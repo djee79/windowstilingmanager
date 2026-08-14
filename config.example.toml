@@ -1,0 +1,124 @@
+# wtm configuration — copy to %APPDATA%\wtm\config.toml
+# Every field is optional; these are the defaults.
+
+# Pixel gap between the work area edge (taskbar excluded) and windows.
+outer_gap = 10
+# Pixel gap between adjacent tiled windows.
+inner_gap = 10
+# Share of space the earlier window keeps at each dwindle split (0.15–0.85).
+split_ratio = 0.5
+# Accent border painted on the focused window (Windows 11 DWM border).
+# Also used as the bar's highlight color and the thick focus frame.
+active_border_color = "#7aa2f7"
+# Thickness (px) of the focus frame drawn around the active window.
+# 0 disables the frame and keeps only the thin DWM border.
+border_thickness = 3
+# Corner radius of the focus frame; 8 matches Windows 11 window corners.
+border_corner_radius = 8
+
+# Workspaces per monitor (1-24). 1-9 map to Alt+1..9, workspace 10 to Alt+0;
+# beyond that, use Alt+comma / Alt+period to cycle, or click the bar cells.
+workspaces = 9
+
+# Optional workspace names, shown in the active bar cell. Also editable from
+# the bar's ≡ settings panel (click a workspace, type, Enter).
+# workspace_names = ["e3d ProjectA", "aveva admin", "mail", "web"]
+
+# Opt-in auto-placement: NEW windows of an app open on its pinned workspace
+# (existing windows are never moved). Easiest way to manage: focus the app on
+# the workspace you want and press the pin_app key (Alt+Shift+P) to toggle;
+# or list rules here. Remove all rules to turn the feature off entirely.
+# [app_rules]
+# "outlook.exe" = 3
+# "ms-teams.exe" = 3
+
+# Waybar-style status bar at the top of each monitor: workspaces (clickable),
+# focused window title, clock, and a "?" keybinding-help button.
+bar_enabled = true
+bar_height = 32
+bar_background = "#181825"
+bar_foreground = "#cdd6f4"
+
+# Window-move animation duration in milliseconds; 0 disables animations.
+animation_ms = 150
+# After moving a window to another workspace, switch to that workspace too.
+follow_moved_window = true
+
+# Keybindings: action = "chord". Only list the ones you want to change —
+# everything else keeps its default (shown below). Modifiers: alt, ctrl,
+# shift, win. Keys: a-z, 0-9, arrows (left/right/up/down), enter, space,
+# tab, f1-f12, comma, period, slash, semicolon, minus, equals, and more.
+# "{n}" stands for the digits 1-9 in the workspace actions.
+# Tip: you can also rebind interactively — click the "?" on the bar, click a
+# row, press the new shortcut. It is saved here automatically.
+[keybindings]
+focus_left = "alt+left"
+focus_right = "alt+right"
+focus_up = "alt+up"
+focus_down = "alt+down"
+swap_left = "alt+shift+left"
+swap_right = "alt+shift+right"
+swap_up = "alt+shift+up"
+swap_down = "alt+shift+down"
+focus_next = "alt+j"
+focus_prev = "alt+k"
+swap_next = "alt+shift+j"
+swap_prev = "alt+shift+k"
+promote = "alt+enter"
+shrink_window = "alt+h"
+grow_window = "alt+l"
+toggle_float = "alt+t"
+toggle_monocle = "alt+f"
+toggle_fullscreen = "alt+shift+f"
+close_window = "alt+q"
+switch_workspace = "alt+{n}"
+move_to_workspace = "alt+shift+{n}"
+next_workspace = "alt+period"
+prev_workspace = "alt+comma"
+move_next_workspace = "alt+shift+period"
+move_prev_workspace = "alt+shift+comma"
+retile = "alt+shift+r"
+toggle_pause = "alt+p"
+pin_app = "alt+shift+p"
+show_help = "alt+slash"
+launcher = "alt+space"
+exit = "alt+shift+e"
+
+# Application launcher (Alt+Space or the » bar button): fuzzy-search these
+# entries, Enter launches. `command` can be an .exe, .bat, .lnk, document or
+# URL; %ENV_VARS% are expanded. `args` and `dir` are optional. If nothing
+# matches what you type, Enter runs the typed text directly.
+#
+# [[launcher]]
+# name = "E3D — ProjectA (local)"
+# command = "C:\\Projects\\ProjectA\\evars.bat"
+# dir = "C:\\Projects\\ProjectA"
+#
+# [[launcher]]
+# name = "E3D — ProjectA (network)"
+# command = "\\\\server\\aveva\\projects\\projecta\\evars.bat"
+#
+# A `key` gives the app a global launch shortcut (also assignable from the
+# launcher GUI: click the row's key chip, press the chord; Backspace clears).
+# [[launcher]]
+# name = "WezTerm"
+# command = "%USERPROFILE%\\scoop\\apps\\wezterm\\current\\wezterm-gui.exe"
+# key = "win+enter"
+
+# Windows that should float (never tile). Classes match exactly,
+# titles match on substring. Non-resizable windows always float.
+float_classes = ["#32770", "OperationStatusWindow"]
+float_titles = []
+
+# Windows never managed at all.
+ignore_classes = [
+  "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+  "Windows.UI.Core.CoreWindow", "XamlExplorerHostIslandWindow",
+  "Xaml_WindowedPopupClass", "TaskListThumbnailWnd",
+  "TopLevelWindowForOverflowXamlIsland",
+]
+ignore_exes = [
+  "SearchHost.exe", "StartMenuExperienceHost.exe",
+  "ShellExperienceHost.exe", "TextInputHost.exe", "LockApp.exe",
+]
+ignore_titles = []
