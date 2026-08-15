@@ -16,6 +16,9 @@ mod keys;
 mod layout;
 mod logger;
 mod monitor;
+mod mouse;
+mod overview;
+mod tray;
 mod window;
 mod wm;
 
@@ -38,8 +41,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotK
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW,
     KillTimer, PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage, CHILDID_SELF,
-    EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
-    EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+    EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_NAMECHANGE,
+    EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
     EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, MSG, OBJID_WINDOW, SPI_SETWORKAREA,
     WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DISPLAYCHANGE,
     WM_ENDSESSION, WM_HOTKEY, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_POPUP,
@@ -80,6 +83,10 @@ unsafe extern "system" fn win_event_proc(
     let w = Window::from_hwnd(hwnd);
     let ev = match event {
         EVENT_OBJECT_SHOW | EVENT_OBJECT_UNCLOAKED => WmEvent::Shown(w),
+        // Firefox & friends show their window first and set the title later,
+        // failing the is_manageable title check at SHOW time. A title change
+        // is a second chance to adopt them.
+        EVENT_OBJECT_NAMECHANGE => WmEvent::Retitled(w),
         EVENT_SYSTEM_MINIMIZEEND => WmEvent::Restored(w),
         EVENT_OBJECT_HIDE | EVENT_OBJECT_CLOAKED => WmEvent::Hidden(w),
         EVENT_OBJECT_DESTROY => WmEvent::Destroyed(w),
@@ -117,6 +124,7 @@ fn install_hooks() -> Vec<HWINEVENTHOOK> {
         (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
         (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE), // covers DESTROY, SHOW, HIDE
         (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
+        (EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE),
     ];
     ranges
         .iter()
@@ -246,8 +254,14 @@ unsafe extern "system" fn events_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_TIMER => {
-            let _ = KillTimer(Some(hwnd), 1);
-            on_display_settled();
+            match wparam.0 {
+                1 => {
+                    let _ = KillTimer(Some(hwnd), 1);
+                    on_display_settled();
+                }
+                2 => poll_config_reload(), // periodic; never killed
+                _ => {}
+            }
             LRESULT(0)
         }
         // Logoff/shutdown: un-hide everything and clear the hidden-window
@@ -288,7 +302,7 @@ fn create_events_window() {
             ..Default::default()
         };
         RegisterClassW(&class);
-        let _ = CreateWindowExW(
+        if let Ok(hwnd) = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("wtm_events"),
             w!("wtm events"),
@@ -301,7 +315,79 @@ fn create_events_window() {
             None,
             Some(hinstance.into()),
             None,
-        );
+        ) {
+            // Config hot-reload: poll config.toml's mtime every 1.5s.
+            SetTimer(Some(hwnd), 2, 1500, None);
+        }
+    }
+}
+
+// ------------------------------------------------------- config hot-reload
+
+thread_local! {
+    static CONFIG_MTIME: RefCell<Option<std::time::SystemTime>> = const { RefCell::new(None) };
+}
+
+fn config_mtime() -> Option<std::time::SystemTime> {
+    config::config_path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+}
+
+fn poll_config_reload() {
+    let m = config_mtime();
+    let changed = CONFIG_MTIME.with(|c| {
+        let mut slot = c.borrow_mut();
+        let changed = slot.is_some() && *slot != m && m.is_some();
+        *slot = m;
+        changed
+    });
+    if !changed {
+        return;
+    }
+    let Some(cfg) = config::try_load() else {
+        crate::logln!("wtm: config.toml changed but did not parse — keeping current settings");
+        return;
+    };
+    // Our own panel saves also touch the file; skip when nothing differs.
+    if with_wm(|wm| wm.config == cfg).unwrap_or(true) {
+        return;
+    }
+    crate::logln!("wtm: config.toml changed — reloading");
+    apply_new_config(cfg);
+}
+
+/// Apply a fresh Config to every subsystem. Also used by the tray's
+/// "Reload config" item.
+pub fn apply_new_config(cfg: config::Config) {
+    with_wm(|wm| wm.apply_config(cfg.clone()));
+    bar::set_keybinds(&cfg.keybindings);
+    overview::close();
+    bar::destroy_all();
+    bar::init(&cfg);
+    // The bars' AppBars just reshaped the work areas.
+    with_wm(|wm| {
+        wm.refresh_monitors();
+        wm.retile_all();
+    });
+    border::set_radius(cfg.border_corner_radius);
+    border::set_style(
+        cfg.border_thickness,
+        config::parse_colorref(&cfg.active_border_color),
+    );
+    mouse::set_enabled(cfg.focus_follows_mouse);
+    reregister_hotkeys();
+    bar::invalidate_all();
+    border::update();
+}
+
+pub fn force_config_reload() {
+    match config::try_load() {
+        Some(cfg) => {
+            crate::logln!("wtm: reloading config");
+            apply_new_config(cfg);
+        }
+        None => crate::logln!("wtm: config.toml missing or malformed — nothing reloaded"),
     }
 }
 
@@ -337,6 +423,7 @@ fn main() {
     if let Some(p) = config::config_path() {
         crate::logln!("wtm: config: {} {}", p.display(), if p.exists() { "" } else { "(defaults)" });
     }
+    CONFIG_MTIME.with(|c| *c.borrow_mut() = config_mtime());
 
     let manager = WindowManager::new(cfg.clone());
     crate::logln!("wtm: managing {} monitor(s)", manager.monitors.len());
@@ -346,6 +433,8 @@ fn main() {
     // refresh geometry before the first tiling pass so nothing overlaps.
     bar::init(&cfg);
     border::init(&cfg);
+    overview::init();
+    tray::init();
     create_events_window();
     with_wm(|wm| {
         wm.refresh_monitors();
@@ -354,6 +443,7 @@ fn main() {
     border::update();
 
     let hooks = install_hooks();
+    mouse::init(cfg.focus_follows_mouse);
     reregister_hotkeys();
     crate::logln!("wtm: running — Alt+Shift+E to exit, Alt+P to pause, Alt+/ for help");
 
@@ -368,6 +458,8 @@ fn main() {
                         Some(Command::ShowHelp) => bar::toggle_help_panel(),
                         Some(Command::Launcher) => bar::toggle_launcher_panel(),
                         Some(Command::Launch(i)) => bar::launch_index(i),
+                        Some(Command::Overview) => overview::toggle(),
+                        Some(Command::WindowSwitcher) => bar::toggle_switcher_panel(),
                         Some(cmd) => {
                             let keep_going =
                                 with_wm(|wm| wm.handle_command(cmd)).unwrap_or(true);
@@ -384,6 +476,10 @@ fn main() {
                 WM_TIMER if msg.hwnd.is_invalid() && animate::is_anim_timer(msg.wParam.0) => {
                     animate::tick();
                 }
+                // …and the focus-follows-mouse settle delay.
+                WM_TIMER if msg.hwnd.is_invalid() && mouse::is_focus_timer(msg.wParam.0) => {
+                    mouse::tick();
+                }
                 WM_APP_EXIT => break,
                 _ => {
                     let _ = TranslateMessage(&msg);
@@ -393,11 +489,13 @@ fn main() {
         }
 
         unregister_all_hotkeys();
+        mouse::destroy();
         for hook in hooks {
             let _ = UnhookWinEvent(hook);
         }
     }
 
+    tray::destroy();
     border::destroy();
     bar::destroy_all();
     with_wm(|wm| wm.cleanup());

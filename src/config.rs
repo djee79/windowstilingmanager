@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// One entry in the Alt+Space application launcher.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LauncherEntry {
     /// Display name, e.g. "E3D — ProjectA (local)".
@@ -23,9 +23,13 @@ pub struct LauncherEntry {
     /// launcher GUI (click the key chip on a row, press the chord).
     #[serde(default)]
     pub key: String,
+    /// Optional group name; the launcher shows grouped entries under
+    /// section headers when browsing. Editable from the manage-apps panel.
+    #[serde(default)]
+    pub group: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Gap between the screen work-area edge and windows, in pixels.
@@ -60,10 +64,19 @@ pub struct Config {
     pub bar_background: String,
     /// Bar text color, "#RRGGBB".
     pub bar_foreground: String,
+    /// Bar opacity, 0-255. 255 = fully opaque; ~235 gives a subtle glass
+    /// look over whatever is behind the bar.
+    pub bar_alpha: u8,
     /// Window-move animation duration in milliseconds; 0 disables.
     pub animation_ms: u32,
     /// After moving a window to another workspace, switch to it too.
     pub follow_moved_window: bool,
+    /// Focus follows the mouse: hovering over a managed window activates it
+    /// without clicking (Hyprland-style).
+    pub focus_follows_mouse: bool,
+    /// A lone window on a workspace fills the whole work area with no gaps
+    /// and no focus frame (Hyprland's no_gaps_when_only).
+    pub smart_gaps: bool,
     /// action -> chord overrides, e.g. `focus_left = "ctrl+alt+left"`.
     /// Missing actions keep their defaults (see keys::ACTIONS).
     pub keybindings: BTreeMap<String, String>,
@@ -97,8 +110,11 @@ impl Default for Config {
             bar_height: 32,
             bar_background: "#181825".to_string(),
             bar_foreground: "#cdd6f4".to_string(),
+            bar_alpha: 235,
             animation_ms: 150,
             follow_moved_window: true,
+            focus_follows_mouse: true,
+            smart_gaps: true,
             keybindings: default_keybindings(),
             launcher: Vec::new(),
             float_classes: vec![
@@ -140,42 +156,52 @@ pub fn config_path() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("wtm").join("config.toml"))
 }
 
-/// Load the config file, falling back to defaults. A malformed file is
-/// reported on stderr but never prevents startup.
-pub fn load() -> Config {
-    let Some(path) = config_path() else {
-        return Config::default();
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(text) => match toml::from_str::<Config>(&text) {
-            Ok(mut cfg) => {
-                // Migrate action names from older versions.
-                for (old, new) in [("shrink_ratio", "shrink_window"), ("grow_ratio", "grow_window")]
-                {
-                    if let Some(chord) = cfg.keybindings.remove(old) {
-                        cfg.keybindings.entry(new.to_string()).or_insert(chord);
-                    }
+/// Parse the config file. None when the file is missing or malformed —
+/// the hot-reload path uses this so a half-written file (editor mid-save)
+/// never blows away the current settings.
+pub fn try_load() -> Option<Config> {
+    let path = config_path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    match toml::from_str::<Config>(&text) {
+        Ok(mut cfg) => {
+            // Migrate action names from older versions.
+            for (old, new) in [("shrink_ratio", "shrink_window"), ("grow_ratio", "grow_window")] {
+                if let Some(chord) = cfg.keybindings.remove(old) {
+                    cfg.keybindings.entry(new.to_string()).or_insert(chord);
                 }
-                // A user [keybindings] table only lists overrides; fill the
-                // rest from defaults so every action stays bound.
-                let mut merged = default_keybindings();
-                merged.extend(cfg.keybindings);
-                cfg.keybindings = merged;
-                cfg.workspaces = cfg.workspaces.clamp(1, 24);
-                cfg.app_rules = cfg
-                    .app_rules
-                    .into_iter()
-                    .map(|(k, v)| (k.to_lowercase(), v))
-                    .collect();
-                cfg
             }
-            Err(e) => {
-                crate::logln!("wtm: error in {}: {e}", path.display());
+            // A user [keybindings] table only lists overrides; fill the
+            // rest from defaults so every action stays bound.
+            let mut merged = default_keybindings();
+            merged.extend(cfg.keybindings);
+            cfg.keybindings = merged;
+            cfg.workspaces = cfg.workspaces.clamp(1, 24);
+            cfg.app_rules = cfg
+                .app_rules
+                .into_iter()
+                .map(|(k, v)| (k.to_lowercase(), v))
+                .collect();
+            Some(cfg)
+        }
+        Err(e) => {
+            crate::logln!("wtm: error in {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// Load the config file, falling back to defaults. A malformed file is
+/// reported in the log but never prevents startup.
+pub fn load() -> Config {
+    let exists = config_path().map(|p| p.exists()).unwrap_or(false);
+    match try_load() {
+        Some(cfg) => cfg,
+        None => {
+            if exists {
                 crate::logln!("wtm: continuing with default configuration");
-                Config::default()
             }
-        },
-        Err(_) => Config::default(),
+            Config::default()
+        }
     }
 }
 
@@ -238,10 +264,34 @@ pub fn save_launcher(entries: &[LauncherEntry]) -> Result<(), String> {
                 if !e.key.is_empty() {
                     t.insert("key".into(), toml::Value::String(e.key.clone()));
                 }
+                if !e.group.is_empty() {
+                    t.insert("group".into(), toml::Value::String(e.group.clone()));
+                }
                 toml::Value::Table(t)
             })
             .collect();
         table.insert("launcher".to_string(), toml::Value::Array(arr));
+    })
+}
+
+pub fn save_workspaces(n: usize) -> Result<(), String> {
+    update_config_file(|table| {
+        table.insert("workspaces".to_string(), toml::Value::Integer(n as i64));
+    })
+}
+
+pub fn save_border_thickness(t: i32) -> Result<(), String> {
+    update_config_file(|table| {
+        table.insert("border_thickness".to_string(), toml::Value::Integer(t as i64));
+    })
+}
+
+pub fn save_border_color(hex: &str) -> Result<(), String> {
+    update_config_file(|table| {
+        table.insert(
+            "active_border_color".to_string(),
+            toml::Value::String(hex.to_string()),
+        );
     })
 }
 

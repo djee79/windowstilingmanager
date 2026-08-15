@@ -10,16 +10,16 @@ use std::ffi::c_void;
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, SetWindowRgn,
-    HRGN, RGN_DIFF,
+    CombineRgn, CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, InvalidateRect,
+    SetWindowRgn, HBRUSH, HRGN, RGN_DIFF,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetLayeredWindowAttributes,
-    SetWindowPos, ShowWindow, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SW_HIDE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetClassLongPtrW,
+    SetLayeredWindowAttributes, SetWindowPos, ShowWindow, GCLP_HBRBACKGROUND, HWND_TOPMOST,
+    LWA_ALPHA, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 thread_local! {
@@ -33,11 +33,10 @@ unsafe extern "system" fn border_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
+// The window is created even with thickness 0 (update() just hides it), so
+// the appearance panel can turn the frame on later without a restart.
 pub fn init(cfg: &Config) {
-    if cfg.border_thickness <= 0 {
-        return;
-    }
-    THICKNESS.with(|t| t.set(cfg.border_thickness));
+    THICKNESS.with(|t| t.set(cfg.border_thickness.max(0)));
     RADIUS.with(|r| r.set(cfg.border_corner_radius.max(0)));
     unsafe {
         let hinstance = GetModuleHandleW(None).unwrap_or_default();
@@ -78,13 +77,16 @@ pub fn update() {
     }
     let hwnd = HWND(raw as *mut c_void);
     let target = crate::with_wm(|wm| wm.border_target()).flatten();
+    let t = THICKNESS.with(|t| t.get());
     unsafe {
         match target {
             None => {
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
+            Some(_) if t <= 0 => {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
             Some(r) => {
-                let t = THICKNESS.with(|t| t.get());
                 let (w, h) = (r.w + 2 * t, r.h + 2 * t);
                 let _ = SetWindowPos(
                     hwnd,
@@ -115,6 +117,33 @@ pub fn update() {
             }
         }
     }
+}
+
+/// Live style change from the bar's appearance panel: new thickness (0
+/// hides the frame) and fill color. The color lives in the window class's
+/// background brush, so swap the brush and force a repaint.
+pub fn set_radius(r: i32) {
+    RADIUS.with(|c| c.set(r.max(0)));
+}
+
+pub fn set_style(thickness: i32, color: u32) {
+    THICKNESS.with(|t| t.set(thickness.max(0)));
+    BORDER.with(|b| {
+        let raw = b.get();
+        if raw == 0 {
+            return;
+        }
+        unsafe {
+            let hwnd = HWND(raw as *mut c_void);
+            let brush = CreateSolidBrush(COLORREF(color));
+            let old = SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, brush.0 as isize);
+            if old != 0 {
+                let _ = DeleteObject(HBRUSH(old as *mut c_void).into());
+            }
+            let _ = InvalidateRect(Some(hwnd), None, true);
+        }
+    });
+    update();
 }
 
 pub fn destroy() {

@@ -76,15 +76,58 @@ Dragging a tiled window onto another one swaps their slots. Dragging any
 window onto a workspace cell on the bar sends it to that workspace — the
 no-memorization way to reach workspace 10+ (works across monitors too).
 
+## More goodies
+
+- **Drag to resize** — grab any tiled window's edge or corner with the
+  mouse; the layout's split ratios follow the drag instead of snapping back.
+- **Workspace overview** (`Alt+`` ` or left-click the tray icon) — an
+  Exposé-style grid of every workspace drawn as a miniature of its layout
+  with app icons. Click a window to jump straight to it.
+- **Window switcher** (`Alt+W`) — fuzzy-search every managed window across
+  all workspaces and monitors; Enter jumps to it, wherever it lives.
+- **Scratchpad** (`Alt+S` / `Alt+Shift+S`) — park windows outside the
+  workspaces and summon them anywhere as a floating topmost cascade
+  (Hyprland's special workspace). `Alt+Shift+S` on a scratchpad window
+  pulls it back out into the current workspace. Each window keeps the size
+  you give it (mouse resize or the grow/shrink keys), `Alt+Shift+F`
+  fullscreens it over everything, and `Alt+N` cycles focus through the
+  scratchpad windows.
+- **Config hot-reload** — edit `config.toml` in any editor and wtm applies
+  it live within ~2 seconds: colors, gaps, workspaces, keybindings, bars.
+- **Smart gaps** — a lone window fills its workspace edge-to-edge with no
+  gaps and no focus frame.
+- **Tray icon** — pause/resume, reload config, a start-with-Windows toggle,
+  and exit; the bar itself is subtly translucent (`bar_alpha`) and all
+  panels get Windows 11 rounded corners. Workspace cells show the app icons
+  of the windows living there.
+
+The bar's ✎ button opens the manage-apps panel: add an app (browse), scan
+every Start Menu app, add a web app from a URL + browser (`--app=` mode),
+or import a browser bookmarks export in bulk. Each entry there has a group
+chip (type a category — the launcher shows grouped entries under section
+headers while browsing) and, for web apps, a 🌐 chip that cycles which
+browser opens it. Ctrl+V pastes into any panel text field. Results are ranked (prefix > substring > fuzzy) and
+boosted by frecency — the apps you launch most (and most recently) float to
+the top, so Alt+Space → Enter fires your daily driver.
+
 ## Configuration
 
 Copy `config.example.toml` to `%APPDATA%\wtm\config.toml`. Gaps, split ratio,
 border color, animation duration, float rules, ignore rules and every
 keybinding are configurable; see the comments in the example file.
 
+The bar's palette button opens an appearance panel for the settings you'll
+want to tweak on a whim: workspace count, focus-frame thickness (0 = off) and
+accent color — 10 one-click presets plus a "custom…" button that opens the
+full RGB color picker. Changes apply instantly and are saved to
+`config.toml`.
+
 Windows animate to their slots over `animation_ms` (default 150ms, ease-out;
 set 0 for instant). `follow_moved_window = false` restores "send silently"
-behavior for the move-to-workspace keys. Note: rebinding a key from the `?`
+behavior for the move-to-workspace keys. Focus follows the mouse by default
+(hovering over a window activates it, Hyprland-style; it never steals focus
+mid-drag or from open menus) — set `focus_follows_mouse = false` for
+click-to-focus. Note: rebinding a key from the `?`
 panel rewrites `config.toml` (settings are preserved, comments are not).
 
 ## Workspace names & app rules

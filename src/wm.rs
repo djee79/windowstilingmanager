@@ -6,7 +6,7 @@ use crate::config::{parse_colorref, Config};
 use crate::layout::{dwindle, Rect};
 use crate::monitor;
 use crate::window::Window;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::PathBuf;
 use windows::Win32::Foundation::POINT;
@@ -24,7 +24,9 @@ pub enum WmEvent {
     /// Window went away (hidden, cloaked or destroyed).
     Hidden(Window),
     Destroyed(Window),
-    Foreground(#[allow(dead_code)] Window),
+    Foreground(Window),
+    /// Window title changed — late-titled windows get adopted here.
+    Retitled(Window),
     MinimizeStart(Window),
     /// The user finished dragging or resizing a window with the mouse.
     /// Carries the bar workspace cell under the cursor, if any, so a window
@@ -64,6 +66,14 @@ pub enum Command {
     MovePrevWorkspace,
     Retile,
     TogglePause,
+    Overview,
+    WindowSwitcher,
+    /// Show/hide the scratchpad windows as floating topmost overlays.
+    ScratchToggle,
+    /// Send the focused window to the scratchpad.
+    ScratchSend,
+    /// Focus the next scratchpad window (summons the scratchpad if hidden).
+    ScratchCycle,
     ShowHelp,
     Launcher,
     /// Launch config.launcher[i] via its assigned shortcut.
@@ -107,11 +117,29 @@ pub struct MonitorState {
     pub active: usize,
 }
 
+/// One row of the fuzzy window switcher.
+pub struct SwitchEntry {
+    pub window: Window,
+    /// Where it lives: workspace name/number, monitor tag, or "scratchpad".
+    pub place: String,
+}
+
+pub struct OverviewSnapshot {
+    /// Coordinate space of the item rects (the monitor's work area).
+    pub source: Rect,
+    pub active: usize,
+    pub names: Vec<String>,
+    /// Per workspace: (window, rect it occupies in `source` space).
+    pub workspaces: Vec<Vec<(Window, Rect)>>,
+}
+
 pub struct BarSnapshot {
     pub active: usize,
     /// One entry per workspace; empty string where unnamed.
     pub names: Vec<String>,
     pub occupied: Vec<bool>,
+    /// Up to 5 windows per workspace, for the little cell icons.
+    pub cell_windows: Vec<Vec<Window>>,
     pub title: String,
     pub paused: bool,
 }
@@ -124,6 +152,13 @@ pub struct WindowManager {
     hidden_by_us: HashSet<isize>,
     border_color: u32,
     paused: bool,
+    /// The scratchpad: windows parked outside every workspace, toggled as
+    /// floating topmost overlays (Hyprland's special workspace).
+    scratch: Vec<Window>,
+    scratch_shown: bool,
+    /// Last size/position the user gave each scratchpad window, so a
+    /// resized scratch terminal stays that size across toggles.
+    scratch_rects: HashMap<isize, Rect>,
 }
 
 impl WindowManager {
@@ -139,7 +174,16 @@ impl WindowManager {
                 active: 0,
             })
             .collect();
-        WindowManager { config, monitors, hidden_by_us: HashSet::new(), border_color, paused: false }
+        WindowManager {
+            config,
+            monitors,
+            hidden_by_us: HashSet::new(),
+            border_color,
+            paused: false,
+            scratch: Vec::new(),
+            scratch_shown: false,
+            scratch_rects: HashMap::new(),
+        }
     }
 
     // ---------------------------------------------------------------- lookup
@@ -155,8 +199,17 @@ impl WindowManager {
         None
     }
 
+    fn in_scratch(&self, w: Window) -> bool {
+        self.scratch.contains(&w)
+    }
+
     fn is_managed(&self, w: Window) -> bool {
-        self.find(w).is_some()
+        self.find(w).is_some() || self.in_scratch(w)
+    }
+
+    /// Should focus-follows-mouse activate this window when hovered?
+    pub fn hover_focus_target(&self, w: Window) -> bool {
+        !self.paused && self.is_managed(w)
     }
 
     pub fn monitor_index_of_handle(&self, handle: isize) -> usize {
@@ -233,6 +286,8 @@ impl WindowManager {
     }
 
     fn unmanage(&mut self, w: Window) {
+        self.scratch.retain(|x| *x != w);
+        self.scratch_rects.remove(&w.0);
         if let Some((mi, wi)) = self.find(w) {
             if self.monitors[mi].workspaces[wi].fullscreen == Some(w) {
                 self.monitors[mi].workspaces[wi].fullscreen = None;
@@ -287,7 +342,12 @@ impl WindowManager {
                 ws.fullscreen = None;
             }
         }
-        let area = mon.work_area.shrink(outer);
+        // Smart gaps: a lone window fills the work area edge to edge.
+        let solo = self.config.smart_gaps
+            && ws.fullscreen.is_none()
+            && ws.floating.is_empty()
+            && ws.tiled.len() == 1;
+        let area = if solo { mon.work_area } else { mon.work_area.shrink(outer) };
         if ws.monocle {
             for w in &ws.tiled {
                 if !w.is_minimized() {
@@ -327,6 +387,11 @@ impl WindowManager {
                 w.set_border_color((Some(w) == focused).then_some(self.border_color));
             }
         }
+        for w in &self.scratch {
+            if w.is_visible() {
+                w.set_border_color((Some(*w) == focused).then_some(self.border_color));
+            }
+        }
     }
 
     // --------------------------------------------------------------- events
@@ -363,15 +428,26 @@ impl WindowManager {
                     self.unmanage(w);
                 }
             }
-            WmEvent::Foreground(_) => {
+            WmEvent::Foreground(w) => {
+                // Second chance for windows we missed at SHOW time (e.g. the
+                // title arrived late): adopt them when they take focus.
+                if !self.is_managed(w) && w.is_manageable(&self.config) {
+                    self.manage(w, true);
+                }
                 self.update_borders();
+            }
+            WmEvent::Retitled(w) => {
+                if !self.is_managed(w) && w.is_manageable(&self.config) {
+                    self.manage(w, true);
+                }
             }
             WmEvent::MoveSizeEnd(w, drop) => self.on_drag_end(w, drop),
         }
     }
 
     /// After a mouse drag: dropped on a bar workspace cell, the window is
-    /// sent to that workspace; dropped onto another tiled window, they swap
+    /// sent to that workspace; resized by its edges, the layout's split
+    /// ratios follow the drag; dropped onto another tiled window, they swap
     /// slots; either way everything snaps back into place.
     fn on_drag_end(&mut self, w: Window, drop: Option<(isize, usize)>) {
         if let Some((mon_handle, target)) = drop {
@@ -387,6 +463,10 @@ impl WindowManager {
         }
         let is_tiled = mon.workspaces[wi].tiled.contains(&w);
         if is_tiled {
+            if self.try_drag_resize(mi, wi, w) {
+                self.retile_monitor(mi);
+                return;
+            }
             let mut pt = POINT::default();
             let _ = unsafe { GetCursorPos(&mut pt) };
             let ws = &mut self.monitors[mi].workspaces[wi];
@@ -402,6 +482,32 @@ impl WindowManager {
         }
     }
 
+    /// If the drag changed the window's *size* (edge/corner resize rather
+    /// than a move), fold the new edges back into the dwindle ratios so the
+    /// splits follow the mouse. Returns true when a resize was applied.
+    fn try_drag_resize(&mut self, mi: usize, wi: usize, w: Window) -> bool {
+        let (outer, inner, split) =
+            (self.config.outer_gap, self.config.inner_gap, self.config.split_ratio);
+        let work_area = self.monitors[mi].work_area;
+        let ws = &mut self.monitors[mi].workspaces[wi];
+        let n = ws.tiled.len();
+        if ws.monocle || n < 2 {
+            return false;
+        }
+        if ws.ratios.len() < n - 1 {
+            ws.ratios.resize(n - 1, split);
+        }
+        let area = work_area.shrink(outer);
+        let Some(idx) = ws.tiled.iter().position(|x| *x == w) else { return false };
+        let expected = crate::layout::dwindle(area, n, &ws.ratios, inner)[idx];
+        let actual = w.visible_rect();
+        if (actual.w - expected.w).abs() <= 10 && (actual.h - expected.h).abs() <= 10 {
+            return false; // pure move: let the swap logic handle it
+        }
+        crate::layout::resize_ratios(area, n, &mut ws.ratios, inner, idx, actual);
+        true
+    }
+
     // ------------------------------------------------------------- commands
 
     /// Returns false when the user asked to exit.
@@ -412,7 +518,12 @@ impl WindowManager {
         }
         match cmd {
             Command::Exit => return false,
-            Command::ShowHelp | Command::Launcher | Command::Launch(_) => {} // handled by the bar
+            // Handled by the bar / overview windows, not the manager.
+            Command::ShowHelp
+            | Command::Launcher
+            | Command::Launch(_)
+            | Command::Overview
+            | Command::WindowSwitcher => {}
             Command::TogglePause => self.toggle_pause(),
             _ if self.paused => {}
             Command::FocusNext => self.focus_neighbor(1),
@@ -439,6 +550,9 @@ impl WindowManager {
             Command::MoveNextWorkspace => self.move_cycle(1),
             Command::MovePrevWorkspace => self.move_cycle(-1),
             Command::PinApp => self.pin_app(),
+            Command::ScratchToggle => self.scratch_toggle(),
+            Command::ScratchSend => self.scratch_send(),
+            Command::ScratchCycle => self.scratch_cycle(),
             Command::Retile => {
                 self.refresh_monitors();
                 self.rescan();
@@ -599,6 +713,13 @@ impl WindowManager {
     /// divider that gave the window its share of space (each split in the
     /// spiral has its own ratio). Floating windows scale about their center.
     fn resize_focused(&mut self, delta: f32) {
+        // Scratchpad windows scale about their center, like floating ones.
+        if let Some(w) = Window::foreground() {
+            if self.in_scratch(w) {
+                self.scale_about_center(w, delta);
+                return;
+            }
+        }
         let Some((w, mi, wi)) = self.focused_window() else { return };
         let ws = &mut self.monitors[mi].workspaces[wi];
         if let Some(i) = ws.tiled.iter().position(|x| *x == w) {
@@ -615,13 +736,16 @@ impl WindowManager {
             ws.ratios[idx] = (ws.ratios[idx] + d).clamp(0.15, 0.85);
             self.retile_monitor(mi);
         } else if ws.floating.contains(&w) {
-            let r = w.visible_rect();
-            let f = if delta > 0.0 { 1.08 } else { 1.0 / 1.08 };
-            let (nw, nh) = (((r.w as f32 * f) as i32).max(200), ((r.h as f32 * f) as i32).max(150));
-            let target =
-                Rect { x: r.x - (nw - r.w) / 2, y: r.y - (nh - r.h) / 2, w: nw, h: nh };
-            crate::animate::set_target(w, target, self.config.animation_ms);
+            self.scale_about_center(w, delta);
         }
+    }
+
+    fn scale_about_center(&self, w: Window, delta: f32) {
+        let r = w.visible_rect();
+        let f = if delta > 0.0 { 1.08 } else { 1.0 / 1.08 };
+        let (nw, nh) = (((r.w as f32 * f) as i32).max(200), ((r.h as f32 * f) as i32).max(150));
+        let target = Rect { x: r.x - (nw - r.w) / 2, y: r.y - (nh - r.h) / 2, w: nw, h: nh };
+        crate::animate::set_target(w, target, self.config.animation_ms);
     }
 
     fn toggle_float(&mut self) {
@@ -646,6 +770,12 @@ impl WindowManager {
     /// Fullscreen covers the entire monitor, bar included. The window is
     /// lifted into the topmost band so it beats the (also topmost) bar.
     fn toggle_fullscreen(&mut self) {
+        if let Some(w) = Window::foreground() {
+            if self.in_scratch(w) {
+                self.scratch_toggle_fullscreen(w);
+                return;
+            }
+        }
         let Some((w, mi, wi)) = self.focused_window() else { return };
         let ws = &mut self.monitors[mi].workspaces[wi];
         if ws.fullscreen == Some(w) {
@@ -736,6 +866,228 @@ impl WindowManager {
             }
         }
         self.retile_monitor(mi);
+        self.update_borders();
+    }
+
+    /// Live-change the number of workspaces per monitor (appearance panel).
+    /// Shrinking merges the removed workspaces' windows into the last
+    /// remaining one. Returns true when the change was applied.
+    pub fn set_workspace_count(&mut self, n: usize) -> bool {
+        let n = n.clamp(1, 24);
+        if self.paused || n == self.config.workspaces {
+            return false;
+        }
+        // Bring every monitor's active workspace into range first, so the
+        // usual switch path un-hides windows before their workspace is cut.
+        for mi in 0..self.monitors.len() {
+            if self.monitors[mi].active >= n {
+                self.switch_workspace_on(mi, n - 1);
+            }
+        }
+        for mon in &mut self.monitors {
+            if mon.workspaces.len() < n {
+                mon.workspaces.resize_with(n, Workspace::default);
+            } else {
+                let removed: Vec<Workspace> = mon.workspaces.drain(n..).collect();
+                for ws in removed {
+                    if let Some(fw) = ws.fullscreen {
+                        fw.set_topmost(false);
+                    }
+                    mon.workspaces[n - 1].tiled.extend(ws.tiled);
+                    mon.workspaces[n - 1].floating.extend(ws.floating);
+                }
+            }
+        }
+        self.config.workspaces = n;
+        self.sync_visibility();
+        self.retile_all();
+        self.update_borders();
+        crate::logln!("wtm: workspace count set to {n}");
+        true
+    }
+
+    /// Live-change the accent color: config, thin DWM borders. The thick
+    /// frame and the bar pick it up through their own set_* calls.
+    pub fn set_accent_color(&mut self, hex: &str) {
+        self.config.active_border_color = hex.to_string();
+        self.border_color = parse_colorref(hex);
+        self.update_borders();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Swap in a freshly loaded config (hot-reload). Workspace count changes
+    /// go through the normal merge path; everything else applies directly.
+    pub fn apply_config(&mut self, mut cfg: Config) {
+        let n = cfg.workspaces;
+        cfg.workspaces = self.config.workspaces;
+        self.config = cfg;
+        self.border_color = parse_colorref(&self.config.active_border_color);
+        self.set_workspace_count(n);
+        self.retile_all();
+        self.update_borders();
+    }
+
+    /// Park the focused window in the scratchpad: out of every workspace,
+    /// hidden until the scratchpad is toggled up. Pressed on a window that
+    /// is already in the scratchpad, it pulls it back out instead.
+    fn scratch_send(&mut self) {
+        if let Some(w) = Window::foreground() {
+            if self.in_scratch(w) {
+                self.scratch_pull(w);
+                return;
+            }
+        }
+        let Some((w, mi, wi)) = self.focused_window() else { return };
+        if self.monitors[mi].workspaces[wi].fullscreen == Some(w) {
+            self.monitors[mi].workspaces[wi].fullscreen = None;
+            w.set_topmost(false);
+        }
+        self.monitors[mi].workspaces[wi].remove(w);
+        self.scratch.push(w);
+        self.hidden_by_us.insert(w.0);
+        w.hide();
+        self.persist_hidden();
+        self.retile_monitor(mi);
+        self.update_borders();
+        crate::logln!("wtm: \"{}\" sent to the scratchpad (same key pulls it back out)", w.title());
+    }
+
+    /// Return a scratchpad window to the focused monitor's active workspace.
+    fn scratch_pull(&mut self, w: Window) {
+        self.scratch.retain(|x| *x != w);
+        self.scratch_rects.remove(&w.0);
+        self.hidden_by_us.remove(&w.0);
+        w.set_topmost(false);
+        if !w.is_visible() {
+            w.show();
+        }
+        let mi = self.focused_monitor();
+        let mon = &mut self.monitors[mi];
+        let ws = &mut mon.workspaces[mon.active];
+        if w.should_float(&self.config) {
+            ws.floating.push(w);
+        } else {
+            ws.tiled.push(w);
+        }
+        if self.scratch.is_empty() {
+            self.scratch_shown = false;
+        }
+        self.persist_hidden();
+        self.retile_monitor(mi);
+        w.focus();
+        self.update_borders();
+        crate::logln!("wtm: \"{}\" pulled out of the scratchpad", w.title());
+    }
+
+    /// Toggle the scratchpad: show every parked window as a floating,
+    /// topmost cascade on the focused monitor, or tuck them all away again.
+    fn scratch_toggle(&mut self) {
+        self.scratch.retain(|w| w.is_valid());
+        if self.scratch.is_empty() {
+            self.scratch_shown = false;
+            crate::logln!("wtm: scratchpad is empty — send a window with the send_scratchpad key");
+            return;
+        }
+        if self.scratch_shown {
+            for w in self.scratch.clone() {
+                if w.is_visible() {
+                    // Remember the size the user left it at.
+                    self.scratch_rects.insert(w.0, w.visible_rect());
+                    self.hidden_by_us.insert(w.0);
+                    w.set_topmost(false);
+                    w.hide();
+                }
+            }
+            self.scratch_shown = false;
+            self.persist_hidden();
+            let mi = self.focused_monitor();
+            if let Some(first) = self.ordered_windows(mi).first() {
+                first.focus();
+            }
+        } else {
+            let mi = self.focused_monitor();
+            let wa = self.monitors[mi].work_area;
+            let list = self.scratch.clone();
+            for (i, w) in list.iter().enumerate() {
+                self.hidden_by_us.remove(&w.0);
+                let off = (i as i32) * 40;
+                // Keep each window's remembered size; center it (cascaded)
+                // on whatever monitor the user is on right now.
+                let (tw, th) = self
+                    .scratch_rects
+                    .get(&w.0)
+                    .map(|r| (r.w.min(wa.w), r.h.min(wa.h)))
+                    .unwrap_or((wa.w * 3 / 5, wa.h * 3 / 5));
+                let target = Rect {
+                    x: wa.x + (wa.w - tw) / 2 + off,
+                    y: wa.y + (wa.h - th) / 2 + off,
+                    w: tw,
+                    h: th,
+                };
+                w.show();
+                w.set_topmost(true);
+                crate::animate::set_target(*w, target, self.config.animation_ms);
+            }
+            self.scratch_shown = true;
+            self.persist_hidden();
+            if let Some(last) = list.last() {
+                last.focus();
+            }
+        }
+        self.update_borders();
+    }
+
+    /// Cycle keyboard focus through the scratchpad windows, summoning the
+    /// scratchpad first if it's hidden.
+    fn scratch_cycle(&mut self) {
+        self.scratch.retain(|w| w.is_valid());
+        if self.scratch.is_empty() {
+            crate::logln!("wtm: scratchpad is empty — send a window with the send_scratchpad key");
+            return;
+        }
+        if !self.scratch_shown {
+            self.scratch_toggle();
+            return;
+        }
+        let cur = Window::foreground().and_then(|f| self.scratch.iter().position(|x| *x == f));
+        let next = cur.map(|i| (i + 1) % self.scratch.len()).unwrap_or(0);
+        let w = self.scratch[next];
+        if !w.is_visible() {
+            self.hidden_by_us.remove(&w.0);
+            w.show();
+            w.set_topmost(true);
+        }
+        w.focus();
+        self.update_borders();
+    }
+
+    /// Fullscreen for a scratchpad window: bounce between the whole monitor
+    /// (it's already topmost, so it covers the bar) and its remembered size.
+    fn scratch_toggle_fullscreen(&mut self, w: Window) {
+        let mi = self.monitor_index_of_handle(w.monitor());
+        let bounds = self.monitors[mi].bounds;
+        let wa = self.monitors[mi].work_area;
+        let cur = w.visible_rect();
+        let anim = self.config.animation_ms;
+        let is_fs = (cur.w - bounds.w).abs() < 60 && (cur.h - bounds.h).abs() < 60;
+        if is_fs {
+            let (tw, th) = self
+                .scratch_rects
+                .get(&w.0)
+                .map(|r| (r.w.min(wa.w), r.h.min(wa.h)))
+                // A remembered fullscreen-sized rect is no restore target.
+                .filter(|&(tw, th)| (tw - bounds.w).abs() >= 60 || (th - bounds.h).abs() >= 60)
+                .unwrap_or((wa.w * 3 / 5, wa.h * 3 / 5));
+            let target =
+                Rect { x: wa.x + (wa.w - tw) / 2, y: wa.y + (wa.h - th) / 2, w: tw, h: th };
+            crate::animate::set_target(w, target, anim);
+        } else {
+            self.scratch_rects.insert(w.0, cur);
+            crate::animate::set_target(w, bounds, anim);
+        }
         self.update_borders();
     }
 
@@ -841,6 +1193,9 @@ impl WindowManager {
             return None;
         }
         let w = Window::foreground()?;
+        if self.in_scratch(w) {
+            return (w.is_visible() && !w.is_minimized()).then(|| w.visible_rect());
+        }
         let (mi, wi) = self.find(w)?;
         if wi != self.monitors[mi].active || !w.is_visible() || w.is_minimized() {
             return None;
@@ -848,7 +1203,111 @@ impl WindowManager {
         if self.monitors[mi].workspaces[wi].fullscreen == Some(w) {
             return None;
         }
+        // Smart gaps: no frame either — the lone window IS the workspace.
+        let ws = &self.monitors[mi].workspaces[wi];
+        if self.config.smart_gaps
+            && ws.fullscreen.is_none()
+            && ws.floating.is_empty()
+            && ws.tiled.len() == 1
+            && ws.tiled[0] == w
+        {
+            return None;
+        }
         Some(w.visible_rect())
+    }
+
+    /// Every managed window with a human-readable location tag, for the
+    /// fuzzy window switcher.
+    pub fn window_list(&self) -> Vec<SwitchEntry> {
+        let multi = self.monitors.len() > 1;
+        let mut out = Vec::new();
+        for (mi, mon) in self.monitors.iter().enumerate() {
+            for (wi, ws) in mon.workspaces.iter().enumerate() {
+                for w in ws.all_windows() {
+                    if !w.is_valid() {
+                        continue;
+                    }
+                    let name = self
+                        .config
+                        .workspace_names
+                        .get(wi)
+                        .filter(|n| !n.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| format!("ws {}", wi + 1));
+                    let place = if multi { format!("M{} · {}", mi + 1, name) } else { name };
+                    out.push(SwitchEntry { window: w, place });
+                }
+            }
+        }
+        for w in &self.scratch {
+            if w.is_valid() {
+                out.push(SwitchEntry { window: *w, place: "scratchpad".to_string() });
+            }
+        }
+        out
+    }
+
+    /// Jump to a window wherever it lives: switch its workspace in if
+    /// needed (or pop it out of the scratchpad), then focus it.
+    pub fn activate_window(&mut self, w: Window) {
+        if let Some((mi, wi)) = self.find(w) {
+            if wi != self.monitors[mi].active {
+                self.switch_workspace_on(mi, wi);
+            }
+            w.focus();
+        } else if self.in_scratch(w) {
+            self.hidden_by_us.remove(&w.0);
+            w.show();
+            w.set_topmost(true);
+            self.scratch_shown = true;
+            self.persist_hidden();
+            w.focus();
+        }
+        self.update_borders();
+    }
+
+    /// Public alias for the overview: which monitor is the user working on.
+    pub fn focused_monitor_index(&self) -> usize {
+        self.focused_monitor()
+    }
+
+    /// Everything the workspace overview needs for one monitor: each
+    /// workspace's windows with the rects they occupy (or would occupy) in
+    /// `source` coordinates, so cards can be drawn as faithful miniatures.
+    pub fn overview_snapshot(&self, monitor_handle: isize) -> Option<OverviewSnapshot> {
+        let mi = self.monitor_index_of_handle(monitor_handle);
+        let mon = self.monitors.get(mi)?;
+        let area = mon.work_area.shrink(self.config.outer_gap);
+        let mut workspaces = Vec::with_capacity(mon.workspaces.len());
+        for ws in &mon.workspaces {
+            let mut items: Vec<(Window, Rect)> = Vec::new();
+            if ws.monocle {
+                // Monocle: show the stack as a cascade so every window peeks out.
+                for (i, w) in ws.tiled.iter().enumerate() {
+                    let off = (i as i32) * 16;
+                    items.push((
+                        *w,
+                        Rect {
+                            x: area.x + off,
+                            y: area.y + off,
+                            w: (area.w - 2 * off).max(60),
+                            h: (area.h - 2 * off).max(60),
+                        },
+                    ));
+                }
+            } else {
+                let rects = dwindle(area, ws.tiled.len(), &ws.ratios, self.config.inner_gap);
+                items.extend(ws.tiled.iter().copied().zip(rects));
+            }
+            for f in &ws.floating {
+                items.push((*f, f.visible_rect()));
+            }
+            workspaces.push(items);
+        }
+        let names = (0..mon.workspaces.len())
+            .map(|i| self.config.workspace_names.get(i).cloned().unwrap_or_default())
+            .collect();
+        Some(OverviewSnapshot { source: mon.work_area, active: mon.active, names, workspaces })
     }
 
     /// Everything the status bar needs to render one monitor.
@@ -866,7 +1325,12 @@ impl WindowManager {
         let names: Vec<String> = (0..mon.workspaces.len())
             .map(|i| self.config.workspace_names.get(i).cloned().unwrap_or_default())
             .collect();
-        Some(BarSnapshot { active: mon.active, names, occupied, title, paused: self.paused })
+        let cell_windows: Vec<Vec<Window>> = mon
+            .workspaces
+            .iter()
+            .map(|ws| ws.all_windows().filter(|w| w.is_valid()).take(5).collect())
+            .collect();
+        Some(BarSnapshot { active: mon.active, names, occupied, cell_windows, title, paused: self.paused })
     }
 
     /// Full reaction to a display-configuration change (docking, resolution,
@@ -1005,6 +1469,13 @@ impl WindowManager {
 
     /// Show everything we hid and drop all borders. Called on clean exit.
     pub fn cleanup(&mut self) {
+        for w in &self.scratch {
+            if self.hidden_by_us.contains(&w.0) {
+                w.show();
+            }
+            w.set_topmost(false);
+            w.set_border_color(None);
+        }
         for mon in &self.monitors {
             for ws in &mon.workspaces {
                 if let Some(fw) = ws.fullscreen {

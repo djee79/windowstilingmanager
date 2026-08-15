@@ -9,6 +9,8 @@ inner_gap = 10
 split_ratio = 0.5
 # Accent border painted on the focused window (Windows 11 DWM border).
 # Also used as the bar's highlight color and the thick focus frame.
+# Color and thickness are also adjustable live from the bar's appearance
+# (palette) button.
 active_border_color = "#7aa2f7"
 # Thickness (px) of the focus frame drawn around the active window.
 # 0 disables the frame and keeps only the thin DWM border.
@@ -18,6 +20,7 @@ border_corner_radius = 8
 
 # Workspaces per monitor (1-24). 1-9 map to Alt+1..9, workspace 10 to Alt+0;
 # beyond that, use Alt+comma / Alt+period to cycle, or click the bar cells.
+# Also adjustable live from the bar's appearance (palette) button.
 workspaces = 9
 
 # Optional workspace names, shown in the active bar cell. Also editable from
@@ -38,11 +41,19 @@ bar_enabled = true
 bar_height = 32
 bar_background = "#181825"
 bar_foreground = "#cdd6f4"
+# Bar opacity, 0-255. 255 = opaque; ~235 gives a subtle glass look.
+bar_alpha = 235
 
 # Window-move animation duration in milliseconds; 0 disables animations.
 animation_ms = 150
 # After moving a window to another workspace, switch to that workspace too.
 follow_moved_window = true
+# Focus follows the mouse: hovering over a window makes it active without
+# clicking (Hyprland-style). Focus is never stolen mid-drag or from menus.
+focus_follows_mouse = true
+# A lone window on a workspace fills the whole work area, no gaps, no focus
+# frame (Hyprland's no_gaps_when_only).
+smart_gaps = true
 
 # Keybindings: action = "chord". Only list the ones you want to change —
 # everything else keeps its default (shown below). Modifiers: alt, ctrl,
@@ -80,6 +91,11 @@ move_prev_workspace = "alt+shift+comma"
 retile = "alt+shift+r"
 toggle_pause = "alt+p"
 pin_app = "alt+shift+p"
+overview = "alt+backtick"
+window_switcher = "alt+w"
+scratchpad = "alt+s"
+send_scratchpad = "alt+shift+s"
+cycle_scratchpad = "alt+n"
 show_help = "alt+slash"
 launcher = "alt+space"
 exit = "alt+shift+e"
@@ -88,6 +104,16 @@ exit = "alt+shift+e"
 # entries, Enter launches. `command` can be an .exe, .bat, .lnk, document or
 # URL; %ENV_VARS% are expanded. `args` and `dir` are optional. If nothing
 # matches what you type, Enter runs the typed text directly.
+# Easiest way to fill this list: the launcher's "scan installed apps…" row
+# lists every Start Menu app — click to add/remove, saved here.
+# Web apps: the "add web app (URL)…" row asks for a URL and a browser, then
+# saves a normal entry (Chromium browsers open it as a chromeless app
+# window via --app=URL). Example of what it writes:
+# [[launcher]]
+# name = "grafana"
+# command = "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+# args = "--app=https://grafana.mycorp.com"
+# key = "alt+g"
 #
 # [[launcher]]
 # name = "E3D — ProjectA (local)"

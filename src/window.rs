@@ -15,17 +15,19 @@ use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYBD_EVENT_FLAGS};
+use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
-    PostMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, GA_ROOT, GWL_EXSTYLE, GWL_STYLE,
-    HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
-    SW_RESTORE, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_CLOSE, WS_CAPTION, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_THICKFRAME,
+    GetAncestor, GetClassLongPtrW, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    IsZoomed, PostMessageW, SendMessageTimeoutW, SetForegroundWindow, SetWindowPos, ShowWindow,
+    GA_ROOT, GCLP_HICON, GWL_EXSTYLE, GWL_STYLE, HICON, HWND_NOTOPMOST, HWND_TOPMOST, ICON_BIG,
+    SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE,
+    SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_GETICON, WS_CAPTION, WS_CHILD,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
-use windows::core::PWSTR;
+use windows::core::{PCWSTR, PWSTR};
 
 /// Stored as a raw pointer value so it is Copy + Eq + Hash and safe to keep
 /// in collections after the window dies.
@@ -74,8 +76,8 @@ impl Window {
         String::from_utf16_lossy(&buf[..len.max(0) as usize])
     }
 
-    /// Executable file name (e.g. "firefox.exe"), if we can open the process.
-    pub fn exe(&self) -> Option<String> {
+    /// Full path of the process executable, if we can open the process.
+    pub fn exe_path(&self) -> Option<String> {
         unsafe {
             let mut pid = 0u32;
             GetWindowThreadProcessId(self.hwnd(), Some(&mut pid));
@@ -93,8 +95,51 @@ impl Window {
             );
             let _ = CloseHandle(handle);
             ok.ok()?;
-            let path = String::from_utf16_lossy(&buf[..len as usize]);
-            path.rsplit(['\\', '/']).next().map(str::to_string)
+            Some(String::from_utf16_lossy(&buf[..len as usize]))
+        }
+    }
+
+    /// Executable file name (e.g. "firefox.exe"), if we can open the process.
+    pub fn exe(&self) -> Option<String> {
+        self.exe_path()
+            .and_then(|p| p.rsplit(['\\', '/']).next().map(str::to_string))
+    }
+
+    /// Best-effort application icon. The bool is true when the icon is ours
+    /// to DestroyIcon (extracted from the exe); window/class icons are
+    /// borrowed handles that belong to the owning process.
+    pub fn app_icon(&self) -> Option<(HICON, bool)> {
+        unsafe {
+            // Ask the window itself, with a timeout so hung apps can't stall us.
+            let mut result: usize = 0;
+            let _ = SendMessageTimeoutW(
+                self.hwnd(),
+                WM_GETICON,
+                WPARAM(ICON_BIG as usize),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG,
+                50,
+                Some(&mut result),
+            );
+            if result != 0 {
+                return Some((HICON(result as *mut c_void), false));
+            }
+            let class_icon = GetClassLongPtrW(self.hwnd(), GCLP_HICON);
+            if class_icon != 0 {
+                return Some((HICON(class_icon as *mut c_void), false));
+            }
+            // Last resort: pull the icon out of the executable.
+            let path = self.exe_path()?;
+            let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut info = SHFILEINFOW::default();
+            let ok = SHGetFileInfoW(
+                PCWSTR(wide.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                Some(&mut info),
+                std::mem::size_of::<SHFILEINFOW>() as u32,
+                SHGFI_ICON | SHGFI_LARGEICON,
+            );
+            (ok != 0 && !info.hIcon.is_invalid()).then(|| (info.hIcon, true))
         }
     }
 
