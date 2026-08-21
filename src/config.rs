@@ -329,6 +329,13 @@ pub fn save_app_rule(exe: &str, workspace: Option<usize>) -> Result<(), String> 
     })
 }
 
+/// Persist the meetings-calendar source (settings panel).
+pub fn save_calendar_source(source: &str) -> Result<(), String> {
+    update_config_file(|table| {
+        table.insert("calendar_source".to_string(), toml::Value::String(source.to_string()));
+    })
+}
+
 /// Persist the scratchpad app list (pin_scratchpad key).
 pub fn save_scratch_apps(apps: &[String]) -> Result<(), String> {
     update_config_file(|table| {

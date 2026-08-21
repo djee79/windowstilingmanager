@@ -99,6 +99,10 @@ enum SettingsItem {
     RulesHeader,
     Rule(String, usize),
     NoRules,
+    CalHeader,
+    CalOff,
+    CalOutlook,
+    CalIcs,
 }
 
 #[derive(Default)]
@@ -106,6 +110,8 @@ struct SettingsState {
     hwnd: isize,
     /// Workspace index whose name is being typed.
     editing: Option<usize>,
+    /// Typing an .ics path/URL for the meetings calendar.
+    editing_cal: bool,
     buffer: String,
 }
 
@@ -2339,7 +2345,26 @@ fn settings_items() -> Vec<SettingsItem> {
             items.push(SettingsItem::Rule(exe, n));
         }
     }
+    items.push(SettingsItem::CalHeader);
+    items.push(SettingsItem::CalOff);
+    items.push(SettingsItem::CalOutlook);
+    items.push(SettingsItem::CalIcs);
     items
+}
+
+/// Apply + persist a new meetings-calendar source from the settings panel.
+fn set_calendar_source(source: &str) {
+    let refresh = crate::with_wm(|wm| {
+        wm.config.calendar_source = source.to_string();
+        wm.config.calendar_refresh_min
+    })
+    .unwrap_or(5);
+    crate::calendar::configure(source, refresh);
+    if let Err(e) = crate::config::save_calendar_source(source) {
+        crate::logln!("wtm: could not save config: {e}");
+    }
+    invalidate_settings();
+    invalidate_all(); // the bar chip appears/disappears
 }
 
 fn settings_rows_top(scale: f32) -> i32 {
@@ -3898,6 +3923,7 @@ fn on_settings_click(hwnd: HWND, y: i32) {
             SETTINGS.with(|s| {
                 let mut st = s.borrow_mut();
                 st.editing = Some(i);
+                st.editing_cal = false;
                 st.buffer = current;
             });
             invalidate_settings();
@@ -3912,12 +3938,28 @@ fn on_settings_click(hwnd: HWND, y: i32) {
             }
             invalidate_settings();
         }
+        Some(SettingsItem::CalOff) => set_calendar_source(""),
+        Some(SettingsItem::CalOutlook) => set_calendar_source("outlook"),
+        Some(SettingsItem::CalIcs) => {
+            let current = crate::with_wm(|wm| wm.config.calendar_source.clone())
+                .unwrap_or_default();
+            SETTINGS.with(|s| {
+                let mut st = s.borrow_mut();
+                st.editing = None;
+                st.editing_cal = true;
+                st.buffer = if current.eq_ignore_ascii_case("outlook") { String::new() } else { current };
+            });
+            invalidate_settings();
+        }
         _ => {}
     }
 }
 
 fn on_settings_char(ch: u32) {
-    let editing = SETTINGS.with(|s| s.borrow().editing.is_some());
+    let editing = SETTINGS.with(|s| {
+        let st = s.borrow();
+        st.editing.is_some() || st.editing_cal
+    });
     if !editing {
         return;
     }
@@ -3928,6 +3970,12 @@ fn on_settings_char(ch: u32) {
                 st.buffer.pop();
             }
             0x0D => return, // Enter handled on WM_KEYDOWN
+            0x16 => {
+                // Ctrl+V: paths and URLs are pasted, not typed.
+                if let Some(t) = clipboard_text() {
+                    st.buffer.push_str(t.trim());
+                }
+            }
             c if c >= 0x20 => {
                 if let Some(c) = char::from_u32(c) {
                     st.buffer.push(c);
@@ -3940,12 +3988,14 @@ fn on_settings_char(ch: u32) {
 }
 
 fn on_settings_key(vk: u32) {
-    let editing = SETTINGS.with(|s| s.borrow().editing);
+    let (editing, editing_cal) =
+        SETTINGS.with(|s| (s.borrow().editing, s.borrow().editing_cal));
     if vk == VK_ESCAPE.0 as u32 {
-        if editing.is_some() {
+        if editing.is_some() || editing_cal {
             SETTINGS.with(|s| {
                 let mut st = s.borrow_mut();
                 st.editing = None;
+                st.editing_cal = false;
                 st.buffer.clear();
             });
             invalidate_settings();
@@ -3955,6 +4005,16 @@ fn on_settings_key(vk: u32) {
         return;
     }
     if vk == VK_RETURN.0 as u32 {
+        if editing_cal {
+            let source = SETTINGS.with(|s| s.borrow().buffer.trim().to_string());
+            SETTINGS.with(|s| {
+                let mut st = s.borrow_mut();
+                st.editing_cal = false;
+                st.buffer.clear();
+            });
+            set_calendar_source(&source);
+            return;
+        }
         if let Some(i) = editing {
             let name = SETTINGS.with(|s| s.borrow().buffer.trim().to_string());
             crate::with_wm(|wm| {
@@ -4007,9 +4067,14 @@ unsafe fn paint_settings(hwnd: HWND) {
     SelectObject(mem, normal.into());
     draw_text(mem, "click a workspace to name it", trc, st.fg, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-    let (editing, buffer) =
-        SETTINGS.with(|s| (s.borrow().editing, s.borrow().buffer.clone()));
-    let names = crate::with_wm(|wm| wm.config.workspace_names.clone()).unwrap_or_default();
+    let (editing, editing_cal, buffer) = SETTINGS.with(|s| {
+        let st = s.borrow();
+        (st.editing, st.editing_cal, st.buffer.clone())
+    });
+    let (names, cal_source) = crate::with_wm(|wm| {
+        (wm.config.workspace_names.clone(), wm.config.calendar_source.clone())
+    })
+    .unwrap_or_default();
 
     let mut y = settings_rows_top(scale);
     for item in settings_items() {
@@ -4055,6 +4120,46 @@ unsafe fn paint_settings(hwnd: HWND) {
                 SelectObject(mem, normal.into());
                 let rrc = RECT { left: pad, top: y, right: w - pad, bottom: y + line_h };
                 draw_text(mem, "none — focus an app and press the pin_app key to pin it", rrc, st.cell_occupied, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+            SettingsItem::CalHeader => {
+                SelectObject(mem, bold.into());
+                let rrc = RECT { left: pad, top: y, right: w - pad, bottom: y + line_h };
+                draw_text(mem, "meetings calendar", rrc, st.accent, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(mem, normal.into());
+                draw_text(mem, "shows your next meeting next to the clock", rrc, st.cell_occupied, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            }
+            SettingsItem::CalOff => {
+                SelectObject(mem, normal.into());
+                let on = cal_source.is_empty();
+                let rrc = RECT { left: pad, top: y, right: w - pad, bottom: y + line_h };
+                let mark = if on { "●" } else { "○" };
+                draw_text(mem, &format!("{mark}  off"), rrc, if on { st.fg } else { st.cell_occupied }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+            SettingsItem::CalOutlook => {
+                SelectObject(mem, normal.into());
+                let on = cal_source.eq_ignore_ascii_case("outlook");
+                let rrc = RECT { left: pad, top: y, right: w - pad, bottom: y + line_h };
+                let mark = if on { "●" } else { "○" };
+                draw_text(mem, &format!("{mark}  outlook — classic Outlook calendar (Teams meetings)"), rrc, if on { st.fg } else { st.cell_occupied }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+            SettingsItem::CalIcs => {
+                SelectObject(mem, normal.into());
+                let custom = !cal_source.is_empty() && !cal_source.eq_ignore_ascii_case("outlook");
+                if editing_cal {
+                    let row = RECT { left: s(6), top: y, right: w - s(6), bottom: y + line_h };
+                    fill(mem, &row, st.cell_empty);
+                }
+                let mark = if custom { "●" } else { "○" };
+                let lrc = RECT { left: pad, top: y, right: pad + s(140), bottom: y + line_h };
+                draw_text(mem, &format!("{mark}  .ics file or URL:"), lrc, if custom { st.fg } else { st.cell_occupied }, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                let vrc = RECT { left: pad + s(148), top: y, right: w - pad, bottom: y + line_h };
+                if editing_cal {
+                    draw_text(mem, &format!("{buffer}_"), vrc, st.fg, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                } else if custom {
+                    draw_text(mem, &cal_source, vrc, st.fg, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                } else {
+                    draw_text(mem, "click to type or paste (Ctrl+V), Enter saves", vrc, st.cell_occupied, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                }
             }
         }
         y += line_h;
