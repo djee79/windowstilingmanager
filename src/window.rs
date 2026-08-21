@@ -26,11 +26,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     IsZoomed, PostMessageW, SendMessageTimeoutW, SetForegroundWindow, SetWindowPos, ShowWindow,
+    GetShellWindow,
     GA_ROOT, GCLP_HICON, GWL_EXSTYLE, GWL_STYLE, GW_OWNER, HICON, HWND_NOTOPMOST, HWND_TOP,
     HWND_TOPMOST, ICON_BIG,
     SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE,
-    SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_GETICON, WS_CAPTION, WS_CHILD,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
+    SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CANCELMODE, WM_CLOSE, WM_GETICON,
+    WS_CAPTION, WS_CHILD,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_THICKFRAME,
 };
 use windows::core::{GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
@@ -391,6 +393,39 @@ impl Window {
 
     pub fn close(&self) {
         let _ = unsafe { PostMessageW(Some(self.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    }
+
+    /// Ask the window to leave any menu / keyboard-accelerator mode (ribbon
+    /// KeyTips — they pop up on Alt-down, before a hotkey chord completes).
+    /// Sent while hiding it, so the app dismisses its own overlay popups
+    /// instead of leaving them painted over the next workspace.
+    pub fn cancel_modes(&self) {
+        let _ = unsafe { PostMessageW(Some(self.hwnd()), WM_CANCELMODE, WPARAM(0), LPARAM(0)) };
+    }
+
+    /// The thread that created the window.
+    pub fn thread_id(&self) -> u32 {
+        unsafe { GetWindowThreadProcessId(self.hwnd(), None) }
+    }
+
+    /// Transient overlay popups — ribbon key-tip badges, tooltips: topmost
+    /// and caption-less. Swept along when their app is hidden but never
+    /// re-shown; the app recreates them on demand, and re-showing a stale
+    /// one paints exactly the artifact we're trying to kill.
+    pub fn is_transient_popup(&self) -> bool {
+        self.ex_style().contains(WS_EX_TOPMOST) && !self.style().contains(WS_CAPTION)
+    }
+
+    /// Park keyboard focus on the shell — used when a workspace switch
+    /// leaves nothing to focus, so keystrokes stop flowing to a window that
+    /// is no longer on screen.
+    pub fn focus_shell() {
+        unsafe {
+            let shell = GetShellWindow();
+            if !shell.is_invalid() {
+                let _ = SetForegroundWindow(shell);
+            }
+        }
     }
 
     /// Some(colorref) paints the Windows 11 frame border; None restores the

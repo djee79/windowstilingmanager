@@ -194,10 +194,28 @@ impl WindowManager {
     /// owned windows along (an app's floating tool palettes and modeless
     /// dialogs stay glued to their owner instead of lingering on screen).
     fn hide_managed(&mut self, w: Window) {
-        let companions: Vec<Window> = crate::enum_top_level_windows()
-            .into_iter()
-            .filter(|c| *c != w && c.is_visible() && c.root_owner() == w && !self.is_managed(*c))
-            .collect();
+        // Ask the app to leave ribbon/menu accelerator mode: KeyTips pop up
+        // on Alt-down, before our hotkey even fires, and a hidden ribbon
+        // never gets around to taking its badges down on its own.
+        w.cancel_modes();
+        let thread = w.thread_id();
+        let mut companions: Vec<Window> = Vec::new();
+        for c in crate::enum_top_level_windows() {
+            if c == w || !c.is_visible() || self.is_managed(c) {
+                continue;
+            }
+            if c.is_transient_popup() {
+                // Overlay badges (key tips, tooltips) are often unowned, so
+                // match them by thread — and hide them for good: the app
+                // recreates them on demand, re-showing one paints a stale
+                // artifact.
+                if c.root_owner() == w || (thread != 0 && c.thread_id() == thread) {
+                    c.hide();
+                }
+            } else if c.root_owner() == w {
+                companions.push(c);
+            }
+        }
         for c in &companions {
             self.hidden_by_us.insert(c.0);
             c.hide();
@@ -911,6 +929,11 @@ impl WindowManager {
         self.retile_monitor(mi);
         if let Some(first) = self.monitors[mi].workspaces[target].all_windows().next() {
             first.focus();
+        } else if Window::foreground().is_some_and(|f| self.hidden_by_us.contains(&f.0)) {
+            // Empty workspace: don't leave keyboard focus on the window we
+            // just hid — keystrokes (and the next hotkey's modifier mask)
+            // would keep flowing to an invisible app.
+            Window::focus_shell();
         }
         self.update_borders();
     }
