@@ -107,6 +107,12 @@ wtm list                  # all actions, their arguments and current keys
   scratchpad windows. `Alt+Ctrl+S` pins the focused app to the scratchpad:
   its windows (KeePass, a drop-down terminal) always open there from then
   on, listed in `scratch_apps` in the config.
+- **Meeting chip** (opt-in) — set `calendar_source = "outlook"` (classic
+  Outlook via COM: offline, no cloud, no OAuth — your Teams meetings live in
+  the Outlook calendar) or point it at any `.ics` file/URL (Google, Proton,
+  Nextcloud). The bar shows your next meeting with a live countdown next to
+  the clock; click it for the agenda, click a meeting to join its Teams
+  link. With no source configured, nothing runs at all.
 - **Config hot-reload** — edit `config.toml` in any editor and wtm applies
   it live within ~2 seconds: colors, gaps, workspaces, keybindings, bars.
 - **Smart gaps** — a lone window fills its workspace edge-to-edge with no

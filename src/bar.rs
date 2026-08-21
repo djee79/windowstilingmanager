@@ -330,6 +330,7 @@ pub fn init(cfg: &Config) {
             (w!("wtm_switcher"), switcher_proc as _),
             (w!("wtm_appscan"), scan_proc as _),
             (w!("wtm_appmgr"), mgr_proc as _),
+            (w!("wtm_agenda"), agenda_proc as _),
         ] {
             let class = WNDCLASSW {
                 style: CS_HREDRAW | CS_VREDRAW,
@@ -433,6 +434,7 @@ pub fn destroy_all() {
     close_switcher();
     close_scan();
     close_mgr();
+    close_agenda();
 }
 
 /// CF_UNICODETEXT clipboard contents, for Ctrl+V in panel text fields.
@@ -577,6 +579,13 @@ fn on_bar_click(hwnd: HWND, x: i32) {
     if x >= rc.right - 5 * l.help_w - 4 * l.gap {
         toggle_launcher_panel();
         return;
+    }
+    let chip = CAL_CHIP.with(|c| c.borrow().get(&(hwnd.0 as isize)).copied());
+    if let Some((cl, cr)) = chip {
+        if x >= cl && x < cr {
+            toggle_agenda_panel();
+            return;
+        }
     }
     let monitor = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
     if let Some(idx) = cell_index_at(hwnd, x) {
@@ -791,6 +800,41 @@ unsafe fn paint_bar(hwnd: HWND) {
     let crc = RECT { left: buttons_left - l.clock_w, top: 0, right: buttons_left - l.pad / 2, bottom: h };
     draw_text(mem, &format!("{:02}:{:02}", t.wHour, t.wMinute), crc, st.fg, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
+    // Next-meeting chip (calendar feature; absent when disabled or idle).
+    let mut title_right = buttons_left - l.clock_w - l.pad;
+    CAL_CHIP.with(|c| c.borrow_mut().remove(&(hwnd.0 as isize)));
+    if let Some(m) = crate::calendar::next_meeting() {
+        let now = crate::calendar::now_epoch();
+        let label = if m.start <= now {
+            format!("● {}", m.subject)
+        } else {
+            let mins = (m.start - now).div_ceil(60);
+            if mins <= 90 {
+                format!("{} {} · {}m", m.start_hm, m.subject, mins)
+            } else {
+                format!("{} {}", m.start_hm, m.subject)
+            }
+        };
+        let scale_px = |v: i32| (v as f32 * scale) as i32;
+        let tw = text_width(mem, &label).min(scale_px(280));
+        let right = buttons_left - l.clock_w - l.pad;
+        let left = right - tw - 2 * l.gap;
+        let cell = RECT { left, top, right, bottom: top + l.cell_h };
+        fill_round(mem, &cell, st.cell_occupied, (l.cell_h / 5).max(4));
+        // Accent once it's imminent (10 min) or running.
+        let soon = m.start <= now + 600;
+        let trc = RECT { left: left + l.gap, top, right: right - l.gap, bottom: top + l.cell_h };
+        draw_text(
+            mem,
+            &label,
+            trc,
+            if soon { st.accent } else { st.fg },
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        CAL_CHIP.with(|c| c.borrow_mut().insert(hwnd.0 as isize, (left, right)));
+        title_right = left - l.pad;
+    }
+
     // Focused window title (or paused notice)
     let title = match &snap {
         Some(s) if s.paused => "⏸  paused — resume with the toggle_pause key".to_string(),
@@ -798,7 +842,7 @@ unsafe fn paint_bar(hwnd: HWND) {
         None => String::new(),
     };
     if !title.is_empty() {
-        let trc = RECT { left: cells_end, top: 0, right: buttons_left - l.clock_w - l.pad, bottom: h };
+        let trc = RECT { left: cells_end, top: 0, right: title_right, bottom: h };
         draw_text(mem, &title, trc, st.fg, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 
@@ -1101,6 +1145,185 @@ fn apply_rebind(action: &str, vk: u32) {
         st.message = saved;
     });
     invalidate_help();
+}
+
+// ---------------------------------------------------------- agenda panel
+
+thread_local! {
+    /// Per-bar (hwnd -> left..right) rect of the next-meeting chip, written
+    /// by the painter so clicks can hit-test the same pixels.
+    static CAL_CHIP: RefCell<HashMap<isize, (i32, i32)>> = RefCell::new(HashMap::new());
+    static AGENDA: RefCell<isize> = const { RefCell::new(0) };
+}
+
+fn agenda_hwnd() -> Option<HWND> {
+    AGENDA.with(|a| {
+        let h = *a.borrow();
+        (h != 0).then(|| HWND(h as *mut c_void))
+    })
+}
+
+fn close_agenda() {
+    if let Some(hwnd) = agenda_hwnd() {
+        AGENDA.with(|a| *a.borrow_mut() = 0);
+        let _ = unsafe { DestroyWindow(hwnd) };
+    }
+}
+
+/// Upcoming meetings, opened from the bar's calendar chip.
+pub fn toggle_agenda_panel() {
+    if agenda_hwnd().is_some() {
+        close_agenda();
+        return;
+    }
+    let rows = (crate::calendar::agenda().len() as i32).clamp(1, 14);
+    let Some(m) = monitor::active() else { return };
+    unsafe {
+        let scale = monitor_scale(m.handle);
+        let s = |v: i32| (v as f32 * scale) as i32;
+        let line_h = s(34);
+        let w = s(480);
+        let h = s(20) * 2 + line_h * (rows + 1); // rows + footer
+        let hinstance = GetModuleHandleW(None).unwrap_or_default();
+        if let Ok(hwnd) = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            w!("wtm_agenda"),
+            w!("wtm agenda"),
+            WS_POPUP | WS_VISIBLE,
+            m.bounds.x + (m.bounds.w - w) / 2,
+            m.bounds.y + m.bounds.h / 5,
+            w,
+            h,
+            None,
+            None,
+            Some(hinstance.into()),
+            None,
+        ) {
+            AGENDA.with(|a| *a.borrow_mut() = hwnd.0 as isize);
+            round_corners(hwnd);
+            Window::from_hwnd(hwnd).focus();
+        }
+    }
+}
+
+unsafe extern "system" fn agenda_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            paint_agenda(hwnd);
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let y = (lparam.0 >> 16) as i16 as i32;
+            on_agenda_click(hwnd, y);
+            LRESULT(0)
+        }
+        WM_KEYDOWN if wparam.0 == 0x1B => {
+            close_agenda();
+            LRESULT(0)
+        }
+        WM_KILLFOCUS => {
+            close_agenda();
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn on_agenda_click(hwnd: HWND, y: i32) {
+    let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
+    let s = |v: i32| (v as f32 * scale) as i32;
+    if y < s(20) {
+        return;
+    }
+    let idx = ((y - s(20)) / s(34)) as usize;
+    let list = crate::calendar::agenda();
+    let Some(m) = list.get(idx) else { return };
+    if m.join_url.is_empty() {
+        return;
+    }
+    crate::logln!("wtm: joining \"{}\"", m.subject);
+    run_command(&m.join_url, "", "");
+    close_agenda();
+}
+
+unsafe fn paint_agenda(hwnd: HWND) {
+    let b = begin_buffered(hwnd);
+    let (mem, w, h) = (b.mem, b.w, b.h);
+    let st = style();
+    let scale = GetDpiForWindow(hwnd) as f32 / 96.0;
+    let s = |v: i32| (v as f32 * scale) as i32;
+    let (pad, line_h) = (s(20), s(34));
+
+    fill(mem, &RECT { left: 0, top: 0, right: w, bottom: h }, st.bg);
+    for edge in [
+        RECT { left: 0, top: 0, right: w, bottom: s(2) },
+        RECT { left: 0, top: h - s(2), right: w, bottom: h },
+        RECT { left: 0, top: 0, right: s(2), bottom: h },
+        RECT { left: w - s(2), top: 0, right: w, bottom: h },
+    ] {
+        fill(mem, &edge, st.accent);
+    }
+
+    let bold = make_font(s(15), FW_BOLD.0 as i32);
+    let normal = make_font(s(14), FW_NORMAL.0 as i32);
+    let old_font = SelectObject(mem, bold.into());
+
+    let list = crate::calendar::agenda();
+    let now = crate::calendar::now_epoch();
+    let mut y = pad;
+    if list.is_empty() {
+        let rc = RECT { left: pad, top: y, right: w - pad, bottom: y + line_h };
+        draw_text(mem, "no upcoming meetings", rc, st.cell_occupied, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    for m in &list {
+        if y + line_h > h - line_h {
+            break;
+        }
+        let ongoing = m.start <= now;
+        if ongoing {
+            let row = RECT { left: s(6), top: y, right: w - s(6), bottom: y + line_h };
+            fill_round(mem, &row, st.cell_occupied, s(6));
+        }
+        SelectObject(mem, bold.into());
+        let trc = RECT { left: pad, top: y, right: pad + s(100), bottom: y + line_h };
+        draw_text(
+            mem,
+            &format!("{}–{}", m.start_hm, m.end_hm),
+            trc,
+            if ongoing { st.accent } else { st.fg },
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
+        let src = RECT { left: pad + s(104), top: y, right: w - s(96), bottom: y + line_h };
+        draw_text(mem, &m.subject, src, st.fg, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(mem, normal.into());
+        // Right column: a join affordance when the meeting has a Teams
+        // link, otherwise the location.
+        let (label, color) = if !m.join_url.is_empty() {
+            ("join ⇗".to_string(), st.accent)
+        } else {
+            (m.location.clone(), st.cell_occupied)
+        };
+        if !label.is_empty() {
+            let lrc = RECT { left: w - s(92), top: y, right: w - pad, bottom: y + line_h };
+            draw_text(mem, &label, lrc, color, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        y += line_h;
+    }
+    SelectObject(mem, normal.into());
+    let frc = RECT { left: pad, top: h - line_h, right: w - pad, bottom: h - s(6) };
+    draw_text(
+        mem,
+        "click a meeting to join · Esc closes",
+        frc,
+        st.cell_occupied,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+
+    SelectObject(mem, old_font);
+    let _ = DeleteObject(bold.into());
+    let _ = DeleteObject(normal.into());
+    end_buffered(b);
 }
 
 // --------------------------------------------------------- launcher panel

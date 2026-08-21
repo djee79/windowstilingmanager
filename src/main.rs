@@ -11,6 +11,7 @@
 mod animate;
 mod bar;
 mod border;
+mod calendar;
 mod config;
 mod keys;
 mod layout;
@@ -502,6 +503,7 @@ fn poll_config_reload() {
 pub fn apply_new_config(cfg: config::Config) {
     with_wm(|wm| wm.apply_config(cfg.clone()));
     bar::set_keybinds(&cfg.keybindings);
+    calendar::configure(&cfg.calendar_source, cfg.calendar_refresh_min);
     overview::close();
     bar::destroy_all();
     bar::init(&cfg);
@@ -583,6 +585,7 @@ fn main() {
     border::init(&cfg);
     overview::init();
     tray::init();
+    calendar::configure(&cfg.calendar_source, cfg.calendar_refresh_min);
     create_events_window();
     with_wm(|wm| {
         wm.refresh_monitors();

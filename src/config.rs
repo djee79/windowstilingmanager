@@ -63,6 +63,13 @@ pub struct Config {
     /// app_rules: AppUserModelID when the app sets one, else the exe name.
     /// Toggled with the pin_scratchpad key; existing windows never move.
     pub scratch_apps: Vec<String>,
+    /// Upcoming-meetings source for the bar's calendar chip. "" = feature
+    /// off (nothing runs). "outlook" reads classic Outlook's calendar via
+    /// COM (offline, no cloud). Anything else is a path or URL to an .ics
+    /// file (Google/Proton/Nextcloud publish these).
+    pub calendar_source: String,
+    /// Minutes between calendar refreshes.
+    pub calendar_refresh_min: u32,
     /// Show the status bar at the top of each monitor.
     pub bar_enabled: bool,
     /// Bar height in logical pixels (scaled by monitor DPI).
@@ -114,6 +121,8 @@ impl Default for Config {
             workspace_names: Vec::new(),
             app_rules: BTreeMap::new(),
             scratch_apps: Vec::new(),
+            calendar_source: String::new(),
+            calendar_refresh_min: 5,
             bar_enabled: true,
             bar_height: 32,
             bar_background: "#181825".to_string(),

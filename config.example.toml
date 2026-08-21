@@ -44,6 +44,18 @@ workspaces = 9
 # pin_scratchpad key (Alt+Ctrl+S); existing windows never move.
 # scratch_apps = ["keepass.exe", "wezterm-gui.exe"]
 
+# Upcoming-meetings chip on the bar (next to the clock): shows your next
+# meeting with a countdown; click it for the agenda, click a meeting to join
+# its Teams link. Off by default — nothing runs until you pick a source:
+#   calendar_source = "outlook"          # classic Outlook via COM (offline,
+#                                        # no cloud/OAuth; Teams meetings
+#                                        # live in the Outlook calendar)
+#   calendar_source = "C:/path/cal.ics"  # or any .ics file…
+#   calendar_source = "https://…/basic.ics"  # …or published .ics URL
+#                                        # (Google/Proton/Nextcloud)
+calendar_source = ""
+calendar_refresh_min = 5
+
 # Waybar-style status bar at the top of each monitor: workspaces (clickable),
 # focused window title, clock, and a "?" keybinding-help button.
 bar_enabled = true
