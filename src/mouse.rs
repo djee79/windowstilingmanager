@@ -17,8 +17,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetAncestor, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
     GetWindowThreadProcessId, KillTimer, SetTimer, SetWindowsHookExW, UnhookWindowsHookEx,
-    WindowFromPoint, GA_ROOT, GUITHREADINFO, GUI_INMENUMODE, GUI_INMOVESIZE, GUI_POPUPMENUMODE,
-    GUI_SYSTEMMENUMODE, HHOOK, WH_MOUSE_LL, WM_MOUSEMOVE,
+    WindowFromPoint, GA_ROOT, GUITHREADINFO, GUI_INMENUMODE, GUI_INMOVESIZE,
+    GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE, HHOOK, WH_MOUSE_LL, WM_MOUSEMOVE,
 };
 
 /// Coalesce mouse-move bursts: hit-test at most this often.
@@ -116,6 +116,13 @@ pub fn tick() {
         let mut fg_pid = 0u32;
         GetWindowThreadProcessId(fg, Some(&mut fg_pid));
         if fg_pid == std::process::id() {
+            return;
+        }
+        // A dialog owned by the hovered window keeps focus — stealing it
+        // would raise the owner over its own delete-confirmation prompt.
+        // root_owner walks GW_OWNER by hand; GA_ROOTOWNER misses owned
+        // non-popup windows like docking panes.
+        if Window::from_hwnd(fg).root_owner() == Window::from_hwnd(hit) {
             return;
         }
         let w = Window::from_hwnd(hit);

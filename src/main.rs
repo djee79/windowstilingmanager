@@ -38,7 +38,10 @@ use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVE
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, RegisterHotKey, SendInput, UnregisterHotKey, INPUT, INPUT_0, INPUT_KEYBOARD,
+    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LWIN, VK_MENU, VK_RWIN,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW,
     KillTimer, PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage, CHILDID_SELF,
@@ -208,6 +211,38 @@ pub fn reregister_hotkeys() {
         }
         crate::logln!("wtm: {} hotkeys registered, {} failed", map.len(), failures);
     });
+}
+
+/// RegisterHotKey swallows the combo key but the foreground app still sees a
+/// "clean" Alt (or Win) press and release, which puts ribbon apps like AVEVA
+/// E3D into keyboard-accelerator mode (KeyTips) and Windows into Start-menu
+/// mode. While the modifier is still held after one of our hotkeys fired,
+/// inject a press of an unassigned virtual key (0xE8 — the same masking
+/// trick AutoHotkey uses) so the app sees Alt+<nothing meaningful> instead
+/// of a lone Alt tap.
+fn mask_hotkey_modifiers() {
+    unsafe {
+        let held = [VK_MENU, VK_LWIN, VK_RWIN]
+            .iter()
+            .any(|vk| GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0);
+        if !held {
+            return;
+        }
+        let key = |flags: KEYBD_EVENT_FLAGS| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0xE8),
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        let inputs = [key(KEYBD_EVENT_FLAGS(0)), key(KEYEVENTF_KEYUP)];
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
 }
 
 fn unregister_all_hotkeys() {
@@ -457,6 +492,9 @@ fn main() {
                 WM_HOTKEY => {
                     let cmd =
                         HOTKEYS.with(|h| h.borrow().get(&(msg.wParam.0 as i32)).copied());
+                    if cmd.is_some() {
+                        mask_hotkey_modifiers();
+                    }
                     match cmd {
                         Some(Command::ShowHelp) => bar::toggle_help_panel(),
                         Some(Command::Launcher) => bar::toggle_launcher_panel(),
