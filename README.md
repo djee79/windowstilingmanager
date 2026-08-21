@@ -104,7 +104,9 @@ wtm list                  # all actions, their arguments and current keys
   pulls it back out into the current workspace. Each window keeps the size
   you give it (mouse resize or the grow/shrink keys), `Alt+Shift+F`
   fullscreens it over everything, and `Alt+N` cycles focus through the
-  scratchpad windows.
+  scratchpad windows. `Alt+Ctrl+S` pins the focused app to the scratchpad:
+  its windows (KeePass, a drop-down terminal) always open there from then
+  on, listed in `scratch_apps` in the config.
 - **Config hot-reload** — edit `config.toml` in any editor and wtm applies
   it live within ~2 seconds: colors, gaps, workspaces, keybindings, bars.
 - **Smart gaps** — a lone window fills its workspace edge-to-edge with no

@@ -58,6 +58,11 @@ pub struct Config {
     /// existing windows are never moved. Created/removed with the pin_app
     /// key or the ≡ panel; empty table = feature entirely off.
     pub app_rules: BTreeMap<String, usize>,
+    /// Apps whose *new* windows open straight into the scratchpad overlay
+    /// instead of tiling (KeePass, a drop-down terminal). Same keys as
+    /// app_rules: AppUserModelID when the app sets one, else the exe name.
+    /// Toggled with the pin_scratchpad key; existing windows never move.
+    pub scratch_apps: Vec<String>,
     /// Show the status bar at the top of each monitor.
     pub bar_enabled: bool,
     /// Bar height in logical pixels (scaled by monitor DPI).
@@ -108,6 +113,7 @@ impl Default for Config {
             workspaces: 9,
             workspace_names: Vec::new(),
             app_rules: BTreeMap::new(),
+            scratch_apps: Vec::new(),
             bar_enabled: true,
             bar_height: 32,
             bar_background: "#181825".to_string(),
@@ -183,6 +189,7 @@ pub fn try_load() -> Option<Config> {
                 .into_iter()
                 .map(|(k, v)| (k.to_lowercase(), v))
                 .collect();
+            cfg.scratch_apps = cfg.scratch_apps.into_iter().map(|s| s.to_lowercase()).collect();
             Some(cfg)
         }
         Err(e) => {
@@ -310,6 +317,14 @@ pub fn save_app_rule(exe: &str, workspace: Option<usize>) -> Result<(), String> 
                 }
             }
         }
+    })
+}
+
+/// Persist the scratchpad app list (pin_scratchpad key).
+pub fn save_scratch_apps(apps: &[String]) -> Result<(), String> {
+    update_config_file(|table| {
+        let arr = apps.iter().map(|s| toml::Value::String(s.clone())).collect();
+        table.insert("scratch_apps".to_string(), toml::Value::Array(arr));
     })
 }
 

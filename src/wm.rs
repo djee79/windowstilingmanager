@@ -77,6 +77,9 @@ pub enum Command {
     ScratchSend,
     /// Focus the next scratchpad window (summons the scratchpad if hidden).
     ScratchCycle,
+    /// Toggle a rule: the focused app's windows always open in the
+    /// scratchpad (like PinApp, but for the scratchpad).
+    PinScratchpad,
     ShowHelp,
     Launcher,
     /// Launch config.launcher[i] via its assigned shortcut.
@@ -322,6 +325,12 @@ impl WindowManager {
     /// workspace instead (hidden there if that workspace isn't active).
     fn manage(&mut self, w: Window, apply_rules: bool) {
         if self.is_managed(w) || self.paused {
+            return;
+        }
+        // Scratchpad apps (KeePass, a drop-down terminal): new windows skip
+        // the layout entirely and open as the scratchpad overlay.
+        if apply_rules && !self.in_scratch(w) && self.is_scratch_app(w) {
+            self.scratch_adopt(w);
             return;
         }
         let mi = self.monitor_index_of_handle(w.monitor());
@@ -668,6 +677,7 @@ impl WindowManager {
             Command::MoveNextWorkspace => self.move_cycle(1),
             Command::MovePrevWorkspace => self.move_cycle(-1),
             Command::PinApp => self.pin_app(),
+            Command::PinScratchpad => self.pin_scratchpad(),
             Command::ScratchToggle => self.scratch_toggle(),
             Command::ScratchSend => self.scratch_send(),
             Command::ScratchCycle => self.scratch_cycle(),
@@ -1093,6 +1103,68 @@ impl WindowManager {
         self.retile_monitor(mi);
         self.update_borders();
         crate::logln!("wtm: \"{}\" sent to the scratchpad (same key pulls it back out)", w.title());
+    }
+
+    /// Is this window's app on the scratch_apps list (AppUserModelID or exe)?
+    fn is_scratch_app(&self, w: Window) -> bool {
+        if self.config.scratch_apps.is_empty() {
+            return false;
+        }
+        let key = w.rule_key();
+        let exe = w.exe().map(|e| e.to_lowercase());
+        self.config
+            .scratch_apps
+            .iter()
+            .any(|a| Some(a) == key.as_ref() || Some(a) == exe.as_ref())
+    }
+
+    /// A scratch-app window just opened: park it in the scratchpad and show
+    /// it as the floating overlay right away.
+    fn scratch_adopt(&mut self, w: Window) {
+        self.scratch.push(w);
+        self.scratch_shown = true;
+        let mi = self.focused_monitor();
+        let wa = self.monitors[mi].work_area;
+        let (tw, th) = self
+            .scratch_rects
+            .get(&w.0)
+            .map(|r| (r.w.min(wa.w), r.h.min(wa.h)))
+            .unwrap_or((wa.w * 3 / 5, wa.h * 3 / 5));
+        let target =
+            Rect { x: wa.x + (wa.w - tw) / 2, y: wa.y + (wa.h - th) / 2, w: tw, h: th };
+        w.set_topmost(true);
+        crate::animate::set_target(w, target, self.config.animation_ms);
+        w.focus();
+        self.update_borders();
+        crate::logln!("wtm: \"{}\" opened into the scratchpad", w.title());
+    }
+
+    /// Toggle a scratchpad rule for the focused app: its new windows open in
+    /// the scratchpad from now on. Pinning also moves the focused window
+    /// there right away; unpinning leaves windows where they are.
+    fn pin_scratchpad(&mut self) {
+        let Some(w) = Window::foreground() else { return };
+        let Some(key) = w.rule_key() else { return };
+        if let Some(pos) = self.config.scratch_apps.iter().position(|a| *a == key) {
+            self.config.scratch_apps.remove(pos);
+            crate::logln!("wtm: {key} unpinned from the scratchpad");
+        } else {
+            self.config.scratch_apps.push(key.clone());
+            crate::logln!("wtm: {key} pinned — its windows open in the scratchpad now");
+            if !self.in_scratch(w) {
+                if let Some((mi, wi)) = self.find(w) {
+                    if self.monitors[mi].workspaces[wi].fullscreen == Some(w) {
+                        self.monitors[mi].workspaces[wi].fullscreen = None;
+                    }
+                    self.monitors[mi].workspaces[wi].remove(w);
+                    self.retile_monitor(mi);
+                }
+                self.scratch_adopt(w);
+            }
+        }
+        if let Err(e) = crate::config::save_scratch_apps(&self.config.scratch_apps) {
+            crate::logln!("wtm: could not save config: {e}");
+        }
     }
 
     /// Return a scratchpad window to the focused monitor's active workspace.

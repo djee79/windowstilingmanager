@@ -39,6 +39,11 @@ workspaces = 9
 # "ms-teams.exe" = 3
 # "bravesoftware.bravebrowser._crx_agimnkijcaahngcdmfeangaknmldooml" = 1
 
+# Apps whose *new* windows always open in the scratchpad overlay instead of
+# tiling (same keys as app_rules). Toggle interactively with the
+# pin_scratchpad key (Alt+Ctrl+S); existing windows never move.
+# scratch_apps = ["keepass.exe", "wezterm-gui.exe"]
+
 # Waybar-style status bar at the top of each monitor: workspaces (clickable),
 # focused window title, clock, and a "?" keybinding-help button.
 bar_enabled = true
@@ -100,6 +105,7 @@ overview = "alt+backtick"
 window_switcher = "alt+w"
 scratchpad = "alt+s"
 send_scratchpad = "alt+shift+s"
+pin_scratchpad = "alt+ctrl+s"
 cycle_scratchpad = "alt+n"
 show_help = "alt+slash"
 launcher = "alt+space"
