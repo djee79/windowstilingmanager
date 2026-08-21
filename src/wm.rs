@@ -162,6 +162,10 @@ pub struct WindowManager {
     /// Unmanaged owned windows (tool palettes, modeless dialogs) hidden along
     /// with their managed owner, keyed by the owner — shown again together.
     companions_hidden: HashMap<isize, Vec<Window>>,
+    /// Windows we managed before that went away on their own (hid to the
+    /// tray, minimized): when they come back, app rules must NOT re-teleport
+    /// them — the user summoned them to where they are now.
+    formerly_managed: HashSet<isize>,
 }
 
 impl WindowManager {
@@ -187,6 +191,7 @@ impl WindowManager {
             scratch_shown: false,
             scratch_rects: HashMap::new(),
             companions_hidden: HashMap::new(),
+            formerly_managed: HashSet::new(),
         }
     }
 
@@ -318,7 +323,10 @@ impl WindowManager {
         let focused = Window::foreground();
         let active = self.monitors[mi].active;
         let mut target = active;
-        if apply_rules && !self.config.app_rules.is_empty() {
+        // Fixed-size windows are prompts, not main windows: teleporting one
+        // to a hidden workspace leaves a modal nobody can see (and a frozen
+        // app behind it).
+        if apply_rules && !self.config.app_rules.is_empty() && w.is_resizable() {
             // Most-specific rule wins: AppUserModelID (per web app), then
             // exe name so plain "brave.exe"-style rules still match.
             let rule = w
@@ -371,6 +379,7 @@ impl WindowManager {
         }
         self.hidden_by_us.remove(&w.0);
         self.release_companions(w);
+        self.formerly_managed.insert(w.0);
         self.persist_hidden();
     }
 
@@ -486,7 +495,10 @@ impl WindowManager {
             WmEvent::Shown(w) => {
                 self.hidden_by_us.remove(&w.0);
                 if !self.is_managed(w) && w.is_manageable(&self.config) {
-                    self.manage(w, true);
+                    // A window we managed before isn't "newly opened": a tray
+                    // app coming back must not be re-teleported by app rules.
+                    let newly_opened = !self.formerly_managed.contains(&w.0);
+                    self.manage(w, newly_opened);
                 }
             }
             WmEvent::Restored(w) => {
@@ -507,6 +519,8 @@ impl WindowManager {
                 } else {
                     self.hidden_by_us.remove(&w.0);
                 }
+                // The handle is gone and Windows recycles hwnd values.
+                self.formerly_managed.remove(&w.0);
             }
             WmEvent::MinimizeStart(w) => {
                 if self.is_managed(w) {
@@ -517,7 +531,8 @@ impl WindowManager {
                 // Second chance for windows we missed at SHOW time (e.g. the
                 // title arrived late): adopt them when they take focus.
                 if !self.is_managed(w) && w.is_manageable(&self.config) {
-                    self.manage(w, true);
+                    let newly_opened = !self.formerly_managed.contains(&w.0);
+                    self.manage(w, newly_opened);
                 }
                 // Focusing a tiled window raises it — put the floating layer
                 // (dialogs) back on top so they stay visible and clickable.
@@ -532,7 +547,8 @@ impl WindowManager {
             }
             WmEvent::Retitled(w) => {
                 if !self.is_managed(w) && w.is_manageable(&self.config) {
-                    self.manage(w, true);
+                    let newly_opened = !self.formerly_managed.contains(&w.0);
+                    self.manage(w, newly_opened);
                 }
             }
             WmEvent::MoveSizeEnd(w, drop) => self.on_drag_end(w, drop),

@@ -227,6 +227,13 @@ impl Window {
         if unsafe { GetAncestor(self.hwnd(), GA_ROOT) } != self.hwnd() {
             return false;
         }
+        // Owned top-level windows are dialogs and prompts (KeePass's unlock
+        // screen, Explorer's replace-file confirmation): they belong beside
+        // their owner, never in the tiling layout — and the companion sweep
+        // already hides/shows them together with it.
+        if self.owner().is_some() {
+            return false;
+        }
         let style = self.style();
         if style.contains(WS_CHILD) || !style.contains(WS_CAPTION) {
             return false;
@@ -406,6 +413,20 @@ impl Window {
     /// The thread that created the window.
     pub fn thread_id(&self) -> u32 {
         unsafe { GetWindowThreadProcessId(self.hwnd(), None) }
+    }
+
+    /// Owner of this window, if any — dialogs and prompts set one.
+    pub fn owner(&self) -> Option<Window> {
+        unsafe { GetWindow(self.hwnd(), GW_OWNER) }
+            .ok()
+            .filter(|o| !o.is_invalid())
+            .map(Window::from_hwnd)
+    }
+
+    /// Resizable (thick-frame) windows are app main windows; fixed-size ones
+    /// are dialogs and prompts.
+    pub fn is_resizable(&self) -> bool {
+        self.style().contains(WS_THICKFRAME)
     }
 
     /// Transient overlay popups — ribbon key-tip badges, tooltips: topmost
