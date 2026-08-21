@@ -159,6 +159,9 @@ pub struct WindowManager {
     /// Last size/position the user gave each scratchpad window, so a
     /// resized scratch terminal stays that size across toggles.
     scratch_rects: HashMap<isize, Rect>,
+    /// Unmanaged owned popups (floating palettes, tool windows — AVEVA)
+    /// hidden together with their owner: owner hwnd -> hidden popups.
+    owned_hidden: HashMap<isize, Vec<isize>>,
 }
 
 impl WindowManager {
@@ -183,6 +186,37 @@ impl WindowManager {
             scratch: Vec::new(),
             scratch_shown: false,
             scratch_rects: HashMap::new(),
+            owned_hidden: HashMap::new(),
+        }
+    }
+
+    /// Hide a window plus any visible popups it owns — floating palettes and
+    /// toolbars that would otherwise linger on screen after their owner is
+    /// hidden by a workspace switch. show_with_owned restores them.
+    fn hide_with_owned(&mut self, w: Window) {
+        let owned = w.owned_visible();
+        if !owned.is_empty() {
+            for p in &owned {
+                self.hidden_by_us.insert(p.0);
+                p.hide();
+            }
+            self.owned_hidden.insert(w.0, owned.iter().map(|p| p.0).collect());
+        }
+        self.hidden_by_us.insert(w.0);
+        w.hide();
+    }
+
+    /// Undo hide_with_owned: the window comes back along with whatever
+    /// palettes were hidden with it.
+    fn show_with_owned(&mut self, w: Window) {
+        self.hidden_by_us.remove(&w.0);
+        w.show();
+        for p in self.owned_hidden.remove(&w.0).unwrap_or_default() {
+            self.hidden_by_us.remove(&p);
+            let p = Window(p);
+            if p.is_valid() {
+                p.show();
+            }
         }
     }
 
@@ -253,11 +287,17 @@ impl WindowManager {
         let active = self.monitors[mi].active;
         let mut target = active;
         if apply_rules && !self.config.app_rules.is_empty() {
-            if let Some(exe) = w.exe() {
-                if let Some(&n) = self.config.app_rules.get(&exe.to_lowercase()) {
-                    if n >= 1 && n <= self.monitors[mi].workspaces.len() {
-                        target = n - 1;
-                    }
+            // Most-specific rule wins: AppUserModelID (per web app), then
+            // exe name so plain "brave.exe"-style rules still match.
+            let rule = w
+                .rule_key()
+                .and_then(|k| self.config.app_rules.get(&k))
+                .or_else(|| {
+                    w.exe().and_then(|e| self.config.app_rules.get(&e.to_lowercase()))
+                });
+            if let Some(&n) = rule {
+                if n >= 1 && n <= self.monitors[mi].workspaces.len() {
+                    target = n - 1;
                 }
             }
         }
@@ -823,15 +863,13 @@ impl WindowManager {
             return;
         }
         for w in mon.workspaces[mon.active].all_windows().collect::<Vec<_>>() {
-            self.hidden_by_us.insert(w.0);
-            w.hide();
+            self.hide_with_owned(w);
         }
         let mon = &mut self.monitors[mi];
         mon.active = target;
         let to_show: Vec<Window> = mon.workspaces[target].all_windows().collect();
         for w in &to_show {
-            self.hidden_by_us.remove(&w.0);
-            w.show();
+            self.show_with_owned(*w);
         }
         self.persist_hidden();
         self.retile_monitor(mi);
@@ -860,8 +898,7 @@ impl WindowManager {
                 self.switch_workspace_on(mi, target);
                 w.focus();
             } else {
-                self.hidden_by_us.insert(w.0);
-                w.hide();
+                self.hide_with_owned(w);
                 self.persist_hidden();
             }
         }
@@ -947,8 +984,7 @@ impl WindowManager {
         }
         self.monitors[mi].workspaces[wi].remove(w);
         self.scratch.push(w);
-        self.hidden_by_us.insert(w.0);
-        w.hide();
+        self.hide_with_owned(w);
         self.persist_hidden();
         self.retile_monitor(mi);
         self.update_borders();
@@ -959,11 +995,8 @@ impl WindowManager {
     fn scratch_pull(&mut self, w: Window) {
         self.scratch.retain(|x| *x != w);
         self.scratch_rects.remove(&w.0);
-        self.hidden_by_us.remove(&w.0);
         w.set_topmost(false);
-        if !w.is_visible() {
-            w.show();
-        }
+        self.show_with_owned(w);
         let mi = self.focused_monitor();
         let mon = &mut self.monitors[mi];
         let ws = &mut mon.workspaces[mon.active];
@@ -996,9 +1029,8 @@ impl WindowManager {
                 if w.is_visible() {
                     // Remember the size the user left it at.
                     self.scratch_rects.insert(w.0, w.visible_rect());
-                    self.hidden_by_us.insert(w.0);
                     w.set_topmost(false);
-                    w.hide();
+                    self.hide_with_owned(w);
                 }
             }
             self.scratch_shown = false;
@@ -1012,7 +1044,6 @@ impl WindowManager {
             let wa = self.monitors[mi].work_area;
             let list = self.scratch.clone();
             for (i, w) in list.iter().enumerate() {
-                self.hidden_by_us.remove(&w.0);
                 let off = (i as i32) * 40;
                 // Keep each window's remembered size; center it (cascaded)
                 // on whatever monitor the user is on right now.
@@ -1027,7 +1058,7 @@ impl WindowManager {
                     w: tw,
                     h: th,
                 };
-                w.show();
+                self.show_with_owned(*w);
                 w.set_topmost(true);
                 crate::animate::set_target(*w, target, self.config.animation_ms);
             }
@@ -1056,8 +1087,7 @@ impl WindowManager {
         let next = cur.map(|i| (i + 1) % self.scratch.len()).unwrap_or(0);
         let w = self.scratch[next];
         if !w.is_visible() {
-            self.hidden_by_us.remove(&w.0);
-            w.show();
+            self.show_with_owned(w);
             w.set_topmost(true);
         }
         w.focus();
@@ -1091,25 +1121,26 @@ impl WindowManager {
         self.update_borders();
     }
 
-    /// Toggle an app rule: "windows of this exe open on this workspace".
-    /// Pressed on an already-pinned combination, it removes the rule.
+    /// Toggle an app rule: "windows of this app open on this workspace".
+    /// Keyed by AppUserModelID when the window has one (so each browser web
+    /// app is its own pin), else by exe name. Pressed on an already-pinned
+    /// combination, it removes the rule.
     fn pin_app(&mut self) {
         let Some((w, _mi, wi)) = self.focused_window() else { return };
-        let Some(exe) = w.exe() else { return };
-        let exe = exe.to_lowercase();
+        let Some(key) = w.rule_key() else { return };
         let n = wi + 1;
-        if self.config.app_rules.get(&exe) == Some(&n) {
-            self.config.app_rules.remove(&exe);
-            if let Err(e) = crate::config::save_app_rule(&exe, None) {
+        if self.config.app_rules.get(&key) == Some(&n) {
+            self.config.app_rules.remove(&key);
+            if let Err(e) = crate::config::save_app_rule(&key, None) {
                 crate::logln!("wtm: could not save config: {e}");
             }
-            crate::logln!("wtm: unpinned {exe}");
+            crate::logln!("wtm: unpinned {key}");
         } else {
-            self.config.app_rules.insert(exe.clone(), n);
-            if let Err(e) = crate::config::save_app_rule(&exe, Some(n)) {
+            self.config.app_rules.insert(key.clone(), n);
+            if let Err(e) = crate::config::save_app_rule(&key, Some(n)) {
                 crate::logln!("wtm: could not save config: {e}");
             }
-            crate::logln!("wtm: pinned {exe} -> workspace {n}");
+            crate::logln!("wtm: pinned {key} -> workspace {n}");
         }
     }
 
@@ -1134,8 +1165,7 @@ impl WindowManager {
             self.switch_workspace_on(tmi, target);
             w.focus();
         } else if target != self.monitors[tmi].active {
-            self.hidden_by_us.insert(w.0);
-            w.hide();
+            self.hide_with_owned(w);
             self.persist_hidden();
         }
         self.retile_monitor(mi);
@@ -1256,8 +1286,7 @@ impl WindowManager {
             }
             w.focus();
         } else if self.in_scratch(w) {
-            self.hidden_by_us.remove(&w.0);
-            w.show();
+            self.show_with_owned(w);
             w.set_topmost(true);
             self.scratch_shown = true;
             self.persist_hidden();
@@ -1406,12 +1435,11 @@ impl WindowManager {
                         continue;
                     }
                     if wi == active {
-                        if self.hidden_by_us.remove(&w.0) {
-                            w.show();
+                        if self.hidden_by_us.contains(&w.0) {
+                            self.show_with_owned(w);
                         }
                     } else if w.is_visible() {
-                        self.hidden_by_us.insert(w.0);
-                        w.hide();
+                        self.hide_with_owned(w);
                     }
                 }
             }
@@ -1489,6 +1517,15 @@ impl WindowManager {
                 }
             }
         }
+        for popups in self.owned_hidden.values() {
+            for p in popups {
+                let p = Window(*p);
+                if p.is_valid() && !p.is_visible() {
+                    p.show();
+                }
+            }
+        }
+        self.owned_hidden.clear();
         self.hidden_by_us.clear();
         self.persist_hidden();
     }

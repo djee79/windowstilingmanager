@@ -5,7 +5,7 @@
 use crate::config::Config;
 use crate::layout::Rect;
 use std::ffi::c_void;
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, TRUE, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
     DWMWA_COLOR_DEFAULT, DWMWA_EXTENDED_FRAME_BOUNDS,
@@ -17,17 +17,28 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYBD_EVENT_FLAGS};
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
+use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClassLongPtrW, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW,
+    EnumWindows, GetAncestor, GetClassLongPtrW, GetClassNameW, GetForegroundWindow, GetWindow,
+    GetWindowLongPtrW,
     GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     IsZoomed, PostMessageW, SendMessageTimeoutW, SetForegroundWindow, SetWindowPos, ShowWindow,
-    GA_ROOT, GCLP_HICON, GWL_EXSTYLE, GWL_STYLE, HICON, HWND_NOTOPMOST, HWND_TOPMOST, ICON_BIG,
+    GA_ROOT, GCLP_HICON, GWL_EXSTYLE, GWL_STYLE, GW_OWNER, HICON, HWND_NOTOPMOST, HWND_TOPMOST,
+    ICON_BIG,
     SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_RESTORE,
     SW_SHOWNOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_GETICON, WS_CAPTION, WS_CHILD,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
 };
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{BOOL, GUID, PCWSTR, PWSTR};
+use windows::Win32::Foundation::PROPERTYKEY;
+
+/// PKEY_AppUserModel_ID from propkey.h — the taskbar-grouping identity a
+/// window can set explicitly, independent of its process executable.
+const PKEY_APP_USER_MODEL_ID: PROPERTYKEY =
+    PROPERTYKEY { fmtid: GUID::from_u128(0x9F4C2855_9F79_4B39_A8D0_E1D42DE1D5F3), pid: 5 };
 
 /// Stored as a raw pointer value so it is Copy + Eq + Hash and safe to keep
 /// in collections after the window dies.
@@ -103,6 +114,29 @@ impl Window {
     pub fn exe(&self) -> Option<String> {
         self.exe_path()
             .and_then(|p| p.rsplit(['\\', '/']).next().map(str::to_string))
+    }
+
+    /// The window's explicit AppUserModelID, if the app set one. Browsers
+    /// give each installed web app its own id (…_crx_<id>), so two Brave
+    /// apps are distinct here even though both processes are brave.exe.
+    pub fn app_id(&self) -> Option<String> {
+        unsafe {
+            let store: IPropertyStore = SHGetPropertyStoreForWindow(self.hwnd()).ok()?;
+            let mut value = store.GetValue(&PKEY_APP_USER_MODEL_ID).ok()?;
+            let s = PropVariantToStringAlloc(&value).ok().map(|pw| {
+                let s = pw.to_string();
+                CoTaskMemFree(Some(pw.0 as *const c_void));
+                s
+            });
+            let _ = PropVariantClear(&mut value);
+            s?.ok().filter(|s| !s.is_empty())
+        }
+    }
+
+    /// Identity used for app_rules: the AppUserModelID when present (so web
+    /// apps sharing one browser exe stay independent), else the exe name.
+    pub fn rule_key(&self) -> Option<String> {
+        self.app_id().or_else(|| self.exe()).map(|s| s.to_lowercase())
     }
 
     /// Best-effort application icon. The bool is true when the icon is ours
@@ -298,6 +332,33 @@ impl Window {
 
     pub fn hide(&self) {
         let _ = unsafe { ShowWindow(self.hwnd(), SW_HIDE) };
+    }
+
+    /// Visible top-level windows owned by this one: floating palettes and
+    /// tool windows (AVEVA and friends) that should disappear together with
+    /// their owner on a workspace switch. Walks each candidate's owner chain
+    /// because some apps interpose a hidden intermediate owner window.
+    pub fn owned_visible(&self) -> Vec<Window> {
+        unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let (target, list) = &mut *(lparam.0 as *mut (HWND, Vec<Window>));
+            if hwnd != *target && IsWindowVisible(hwnd).as_bool() {
+                let mut owner = GetWindow(hwnd, GW_OWNER).unwrap_or_default();
+                for _ in 0..8 {
+                    if owner.is_invalid() {
+                        break;
+                    }
+                    if owner == *target {
+                        list.push(Window::from_hwnd(hwnd));
+                        break;
+                    }
+                    owner = GetWindow(owner, GW_OWNER).unwrap_or_default();
+                }
+            }
+            TRUE
+        }
+        let mut ctx: (HWND, Vec<Window>) = (self.hwnd(), Vec::new());
+        let _ = unsafe { EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize)) };
+        ctx.1
     }
 
     pub fn show(&self) {

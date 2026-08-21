@@ -35,12 +35,12 @@ use windows::Win32::Graphics::Gdi::{
     GetTextExtentPoint32W, GetTextFaceW, InvalidateRect, ReleaseDC, SelectObject, SetBkMode,
     SetTextColor,
     DrawTextW, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
-    FW_BOLD, FW_NORMAL, HDC, HFONT, PAINTSTRUCT, SRCCOPY, TRANSPARENT, CLEARTYPE_QUALITY,
+    FW_BOLD, FW_NORMAL, HDC, HFONT, HMONITOR, PAINTSTRUCT, SRCCOPY, TRANSPARENT, CLEARTYPE_QUALITY,
     DEFAULT_CHARSET, FONT_OUTPUT_PRECISION, FONT_CLIP_PRECISION,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LWIN, VK_MENU,
     VK_RETURN, VK_RWIN, VK_SHIFT, VK_UP,
@@ -898,23 +898,26 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
         .all(|n| hay.any(|h| h == n))
 }
 
+/// Effective DPI scale of a monitor, for sizing panels before they exist.
+fn monitor_scale(handle: isize) -> f32 {
+    let (mut dx, mut dy) = (96u32, 96u32);
+    let hmon = HMONITOR(handle as *mut c_void);
+    match unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) } {
+        Ok(()) => dx as f32 / 96.0,
+        Err(_) => 1.0,
+    }
+}
+
 /// Open or close the keybindings panel (bar "?" button or show_help key).
 pub fn toggle_help_panel() {
     if help_hwnd().is_some() {
         close_help();
         return;
     }
-    let monitors = monitor::enumerate();
-    let Some(m) = monitors.first() else { return };
+    let Some(m) = monitor::active() else { return };
     unsafe {
         let entries = KEYBINDS.with(|k| k.borrow().len()) as i32;
-        // Estimate scale from a bar if present; corrected visually by DPI-aware fonts.
-        let scale = BARS.with(|b| {
-            b.borrow()
-                .first()
-                .map(|bar| GetDpiForWindow(HWND(bar.hwnd as *mut c_void)) as f32 / 96.0)
-                .unwrap_or(1.0)
-        });
+        let scale = monitor_scale(m.handle);
         let s = |v: i32| (v as f32 * scale) as i32;
         let pm = panel_metrics(scale);
         let w = s(600);
@@ -1684,15 +1687,9 @@ pub fn toggle_launcher_panel() {
         close_launcher();
         return;
     }
-    let monitors = monitor::enumerate();
-    let Some(m) = monitors.first() else { return };
+    let Some(m) = monitor::active() else { return };
     unsafe {
-        let scale = BARS.with(|b| {
-            b.borrow()
-                .first()
-                .map(|bar| GetDpiForWindow(HWND(bar.hwnd as *mut c_void)) as f32 / 96.0)
-                .unwrap_or(1.0)
-        });
+        let scale = monitor_scale(m.handle);
         let s = |v: i32| (v as f32 * scale) as i32;
         let line_h = s(28);
         // Grow with the list (entries + group headers), up to ~70% of the
@@ -2172,15 +2169,9 @@ pub fn toggle_mgr_panel() {
         close_mgr();
         return;
     }
-    let monitors = monitor::enumerate();
-    let Some(m) = monitors.first() else { return };
+    let Some(m) = monitor::active() else { return };
     unsafe {
-        let scale = BARS.with(|b| {
-            b.borrow()
-                .first()
-                .map(|bar| GetDpiForWindow(HWND(bar.hwnd as *mut c_void)) as f32 / 96.0)
-                .unwrap_or(1.0)
-        });
+        let scale = monitor_scale(m.handle);
         let s = |v: i32| (v as f32 * scale) as i32;
         let w = s(640);
         let h = (m.bounds.h * 3 / 4).min(s(760));
@@ -2719,15 +2710,9 @@ fn import_bookmarks_flow() {
 }
 
 fn open_scan(apps: Vec<(String, String)>, bookmarks: bool) {
-    let monitors = monitor::enumerate();
-    let Some(m) = monitors.first() else { return };
+    let Some(m) = monitor::active() else { return };
     unsafe {
-        let scale = BARS.with(|b| {
-            b.borrow()
-                .first()
-                .map(|bar| GetDpiForWindow(HWND(bar.hwnd as *mut c_void)) as f32 / 96.0)
-                .unwrap_or(1.0)
-        });
+        let scale = monitor_scale(m.handle);
         let s = |v: i32| (v as f32 * scale) as i32;
         let w = s(560);
         let h = (m.bounds.h * 3 / 4).min(s(720));
@@ -3088,15 +3073,9 @@ pub fn toggle_switcher_panel() {
         close_switcher();
         return;
     }
-    let monitors = monitor::enumerate();
-    let Some(m) = monitors.first() else { return };
+    let Some(m) = monitor::active() else { return };
     unsafe {
-        let scale = BARS.with(|b| {
-            b.borrow()
-                .first()
-                .map(|bar| GetDpiForWindow(HWND(bar.hwnd as *mut c_void)) as f32 / 96.0)
-                .unwrap_or(1.0)
-        });
+        let scale = monitor_scale(m.handle);
         let s = |v: i32| (v as f32 * scale) as i32;
         let w = s(600);
         let h = (s(20) + s(26) * 2 + s(28) * 14 + s(40)).min(m.bounds.h - s(120));
@@ -3393,15 +3372,9 @@ pub fn toggle_tweaks_panel() {
         close_tweaks();
         return;
     }
-    let monitors = monitor::enumerate();
-    let Some(m) = monitors.first() else { return };
+    let Some(m) = monitor::active() else { return };
     unsafe {
-        let scale = BARS.with(|b| {
-            b.borrow()
-                .first()
-                .map(|bar| GetDpiForWindow(HWND(bar.hwnd as *mut c_void)) as f32 / 96.0)
-                .unwrap_or(1.0)
-        });
+        let scale = monitor_scale(m.handle);
         let s = |v: i32| (v as f32 * scale) as i32;
         let w = s(348);
         let h = tweaks_rows_top(scale) + 4 * s(TWEAKS_LINE) + s(44);
@@ -3625,15 +3598,9 @@ pub fn toggle_settings_panel() {
         close_settings();
         return;
     }
-    let monitors = monitor::enumerate();
-    let Some(m) = monitors.first() else { return };
+    let Some(m) = monitor::active() else { return };
     unsafe {
-        let scale = BARS.with(|b| {
-            b.borrow()
-                .first()
-                .map(|bar| GetDpiForWindow(HWND(bar.hwnd as *mut c_void)) as f32 / 96.0)
-                .unwrap_or(1.0)
-        });
+        let scale = monitor_scale(m.handle);
         let s = |v: i32| (v as f32 * scale) as i32;
         let line_h = s(26);
         let items = settings_items().len() as i32;

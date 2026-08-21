@@ -31,9 +31,13 @@ workspaces = 9
 # (existing windows are never moved). Easiest way to manage: focus the app on
 # the workspace you want and press the pin_app key (Alt+Shift+P) to toggle;
 # or list rules here. Remove all rules to turn the feature off entirely.
+# Keys are the window's AppUserModelID when the app sets one — browser web
+# apps (Brave/Chrome "open as app") each get their own id, so YouTube and
+# Wikipedia pin independently — otherwise the exe name.
 # [app_rules]
 # "outlook.exe" = 3
 # "ms-teams.exe" = 3
+# "bravesoftware.bravebrowser._crx_agimnkijcaahngcdmfeangaknmldooml" = 1
 
 # Waybar-style status bar at the top of each monitor: workspaces (clickable),
 # focused window title, clock, and a "?" keybinding-help button.

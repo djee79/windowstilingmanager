@@ -141,7 +141,10 @@ App rules are strictly opt-in: pin an app with `Alt+Shift+P` while it's
 focused on the workspace you want, and only its *newly opened* windows are
 sent there (hidden if that workspace isn't visible). Existing windows are
 never moved, restores from minimize are never redirected, and with no pins
-the feature is entirely inert.
+the feature is entirely inert. Apps are identified by their AppUserModelID
+when they set one (each browser web app — Brave/Chrome "open as app" — has
+its own), falling back to the exe name, so pinning the YouTube app doesn't
+drag other Brave windows along with it.
 
 ## Application launcher
 

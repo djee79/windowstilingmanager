@@ -3,10 +3,12 @@
 
 use crate::layout::Rect;
 use windows::core::BOOL;
-use windows::Win32::Foundation::{LPARAM, RECT, TRUE};
+use windows::Win32::Foundation::{LPARAM, POINT, RECT, TRUE};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, HDC, HMONITOR, MONITORINFO,
+    MONITOR_DEFAULTTOPRIMARY,
 };
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 const MONITORINFOF_PRIMARY: u32 = 1;
 
@@ -54,4 +56,16 @@ pub fn enumerate() -> Vec<MonitorInfo> {
     }
     list.sort_by_key(|m| !m.primary); // primary first
     list
+}
+
+/// The monitor the user is on: the one under the mouse cursor, falling back
+/// to the primary. Panels (launcher, help, settings, …) open here.
+pub fn active() -> Option<MonitorInfo> {
+    let list = enumerate();
+    let mut pt = POINT::default();
+    let _ = unsafe { GetCursorPos(&mut pt) };
+    let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY) };
+    let handle = hmon.0 as isize;
+    let idx = list.iter().position(|m| m.handle == handle).unwrap_or(0);
+    list.into_iter().nth(idx)
 }

@@ -30,6 +30,7 @@ use windows::core::{w, BOOL};
 use windows::Win32::Foundation::{
     GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM,
 };
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId, Sleep};
@@ -404,6 +405,8 @@ fn main() {
     logger::init();
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // Shell property-store reads (Window::app_id) need COM on this thread.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
         // Single instance.
         let _mutex = CreateMutexW(None, true, w!("Local\\wtm-tiling-wm"));

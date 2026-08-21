@@ -51,10 +51,12 @@ pub struct Config {
     /// Optional workspace names shown on the bar; index 0 = workspace 1.
     /// Editable from the bar's settings (≡) panel.
     pub workspace_names: Vec<String>,
-    /// Opt-in auto-placement: exe name -> workspace number (1-based).
-    /// *New* windows of that app open in that workspace; existing windows
-    /// are never moved. Created/removed with the pin_app key or the ≡ panel;
-    /// empty table = feature entirely off.
+    /// Opt-in auto-placement: app key -> workspace number (1-based). The key
+    /// is the window's AppUserModelID when the app sets one (each browser
+    /// web app has its own, e.g. "bravesoftware.bravebrowser._crx_…"), else
+    /// the exe name. *New* windows of that app open in that workspace;
+    /// existing windows are never moved. Created/removed with the pin_app
+    /// key or the ≡ panel; empty table = feature entirely off.
     pub app_rules: BTreeMap<String, usize>,
     /// Show the status bar at the top of each monitor.
     pub bar_enabled: bool,
