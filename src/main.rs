@@ -31,8 +31,11 @@ use windows::Win32::Foundation::{
     GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
+#[cfg(not(debug_assertions))]
+use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId, Sleep};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::HiDpi::{
@@ -43,12 +46,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LWIN, VK_MENU, VK_RWIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetCursorPos, GetMessageW,
-    KillTimer, PostThreadMessageW, RegisterClassW, SetTimer, TranslateMessage, CHILDID_SELF,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, FindWindowW, GetCursorPos,
+    GetMessageW,
+    KillTimer, PostThreadMessageW, RegisterClassW, SendMessageW, SetTimer, TranslateMessage,
+    CHILDID_SELF,
     EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_NAMECHANGE,
     EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
     EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, MSG, OBJID_WINDOW, SPI_SETWORKAREA,
-    WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DISPLAYCHANGE,
+    WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_COPYDATA,
+    WM_DISPLAYCHANGE,
     WM_ENDSESSION, WM_HOTKEY, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_POPUP,
 };
 use wm::{Command, WindowManager, WmEvent};
@@ -59,6 +65,8 @@ thread_local! {
 
 static MAIN_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 const WM_APP_EXIT: u32 = WM_APP + 1;
+/// dwData tag marking a WM_COPYDATA payload as a `wtm <action>` CLI command.
+const CLI_COPYDATA_ID: usize = 0x77746D01;
 
 /// try_borrow_mut guards against reentrancy if a hook ever fires while we're
 /// already inside the manager (shouldn't happen out-of-context, but cheap).
@@ -245,6 +253,79 @@ fn mask_hotkey_modifiers() {
     }
 }
 
+/// Execute a command exactly like a hotkey press would — shared by hotkeys
+/// and the `wtm <action>` CLI. Returns false when the command asks to exit.
+fn run_command(cmd: Command) -> bool {
+    match cmd {
+        Command::ShowHelp => bar::toggle_help_panel(),
+        Command::Launcher => bar::toggle_launcher_panel(),
+        Command::Launch(i) => bar::launch_index(i),
+        Command::Overview => overview::toggle(),
+        Command::WindowSwitcher => bar::toggle_switcher_panel(),
+        cmd => {
+            let keep_going = with_wm(|wm| wm.handle_command(cmd)).unwrap_or(true);
+            bar::invalidate_all();
+            border::update();
+            return keep_going;
+        }
+    }
+    true
+}
+
+/// `wtm <action> [n]`: hand the action to the running instance over
+/// WM_COPYDATA, hyprctl-style. Workspace numbers are 1-based, as on the bar.
+fn run_cli(args: &[String]) -> i32 {
+    // Release builds have no console; borrow the parent terminal's so the
+    // output lands where the user typed the command.
+    #[cfg(not(debug_assertions))]
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+    let action = args[0].trim_start_matches('-').replace('-', "_").to_ascii_lowercase();
+    if matches!(action.as_str(), "help" | "list") {
+        println!("wtm <action> [n] — control the running wtm from the command line\n");
+        for (a, chord, desc) in keys::ACTIONS {
+            let n = if keys::is_numbered(a) { " <n>" } else { "" };
+            println!("  {:<24} {desc}  [{chord}]", format!("{a}{n}"));
+        }
+        return 0;
+    }
+    let number: Option<usize> = args.get(1).and_then(|s| s.parse().ok());
+    if keys::is_numbered(&action) && number.is_none() {
+        eprintln!("wtm: \"{action}\" needs a workspace number, e.g. `wtm {action} 3`");
+        return 2;
+    }
+    // Workspace numbers are 1-based for humans, 0-based internally.
+    let digit = number.map(|n| n.saturating_sub(1));
+    if keys::action_to_command(&action, digit.or(Some(0))).is_none() {
+        eprintln!("wtm: unknown action \"{action}\" — see `wtm list`");
+        return 2;
+    }
+    let payload = match digit {
+        Some(d) => format!("{action} {d}"),
+        None => action.clone(),
+    };
+    let wide: Vec<u16> = payload.encode_utf16().collect();
+    unsafe {
+        let Ok(target) = FindWindowW(w!("wtm_events"), None) else {
+            eprintln!("wtm: no running instance");
+            return 1;
+        };
+        let cds = COPYDATASTRUCT {
+            dwData: CLI_COPYDATA_ID,
+            cbData: (wide.len() * 2) as u32,
+            lpData: wide.as_ptr() as *mut std::ffi::c_void,
+        };
+        SendMessageW(
+            target,
+            WM_COPYDATA,
+            Some(WPARAM(0)),
+            Some(LPARAM(&cds as *const _ as isize)),
+        );
+    }
+    0
+}
+
 fn unregister_all_hotkeys() {
     HOTKEYS.with(|cell| {
         for id in cell.borrow_mut().drain().map(|(id, _)| id) {
@@ -304,6 +385,29 @@ unsafe extern "system" fn events_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         // journal so no stale handles get "restored" on the next boot.
         WM_ENDSESSION if wparam.0 != 0 => {
             with_wm(|wm| wm.cleanup());
+            LRESULT(0)
+        }
+        // `wtm <action>` CLI: another wtm process handing us a command.
+        WM_COPYDATA => {
+            let cds = lparam.0 as *const COPYDATASTRUCT;
+            if !cds.is_null() && (*cds).dwData == CLI_COPYDATA_ID && !(*cds).lpData.is_null() {
+                let words = std::slice::from_raw_parts(
+                    (*cds).lpData as *const u16,
+                    (*cds).cbData as usize / 2,
+                );
+                let text = String::from_utf16_lossy(words);
+                let mut it = text.split_whitespace();
+                let action = it.next().unwrap_or_default();
+                let digit = it.next().and_then(|s| s.parse().ok());
+                if let Some(cmd) = keys::action_to_command(action, digit) {
+                    crate::logln!("wtm: cli: {text}");
+                    if !run_command(cmd) {
+                        let tid = MAIN_THREAD_ID.load(Ordering::SeqCst);
+                        let _ = PostThreadMessageW(tid, WM_APP_EXIT, WPARAM(0), LPARAM(0));
+                    }
+                    return LRESULT(1);
+                }
+            }
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -437,6 +541,12 @@ unsafe extern "system" fn ctrl_handler(_kind: u32) -> BOOL {
 }
 
 fn main() {
+    // hyprctl-style remote control: `wtm <action> [n]` sends the action to
+    // the running instance (e.g. `wtm toggle_split`, `wtm switch_workspace 3`).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        std::process::exit(run_cli(&args));
+    }
     logger::init();
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -492,25 +602,11 @@ fn main() {
                 WM_HOTKEY => {
                     let cmd =
                         HOTKEYS.with(|h| h.borrow().get(&(msg.wParam.0 as i32)).copied());
-                    if cmd.is_some() {
+                    if let Some(cmd) = cmd {
                         mask_hotkey_modifiers();
-                    }
-                    match cmd {
-                        Some(Command::ShowHelp) => bar::toggle_help_panel(),
-                        Some(Command::Launcher) => bar::toggle_launcher_panel(),
-                        Some(Command::Launch(i)) => bar::launch_index(i),
-                        Some(Command::Overview) => overview::toggle(),
-                        Some(Command::WindowSwitcher) => bar::toggle_switcher_panel(),
-                        Some(cmd) => {
-                            let keep_going =
-                                with_wm(|wm| wm.handle_command(cmd)).unwrap_or(true);
-                            bar::invalidate_all();
-                            border::update();
-                            if !keep_going {
-                                break;
-                            }
+                        if !run_command(cmd) {
+                            break;
                         }
-                        None => {}
                     }
                 }
                 // Thread timers (hwnd == 0) drive the window animations.

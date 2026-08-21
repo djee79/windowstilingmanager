@@ -57,6 +57,9 @@ pub enum Command {
     ToggleFloat,
     ToggleMonocle,
     ToggleFullscreen,
+    /// Flip the split direction at the focused window (side-by-side ⇄
+    /// stacked), like Hyprland's dwindle togglesplit.
+    ToggleSplit,
     CloseWindow,
     SwitchWorkspace(usize),
     MoveToWorkspace(usize),
@@ -90,6 +93,9 @@ pub struct Workspace {
     /// Per-split ratios for the dwindle spiral; ratios[i] is the share
     /// window i keeps when it splits off the remaining space.
     pub ratios: Vec<f32>,
+    /// Per-split orientation overrides: flips[i] inverts split i's automatic
+    /// (aspect-based) direction — Hyprland's togglesplit.
+    pub flips: Vec<bool>,
     pub monocle: bool,
     /// Window covering the whole monitor (over the bar), if any.
     pub fullscreen: Option<Window>,
@@ -440,7 +446,7 @@ impl WindowManager {
             if ws.ratios.len() < needed {
                 ws.ratios.resize(needed, self.config.split_ratio);
             }
-            let rects = dwindle(area, ws.tiled.len(), &ws.ratios, inner);
+            let rects = dwindle(area, ws.tiled.len(), &ws.ratios, &ws.flips, inner);
             for (w, r) in ws.tiled.iter().zip(rects) {
                 crate::animate::set_target(*w, r, anim);
             }
@@ -609,12 +615,13 @@ impl WindowManager {
         }
         let area = work_area.shrink(outer);
         let Some(idx) = ws.tiled.iter().position(|x| *x == w) else { return false };
-        let expected = crate::layout::dwindle(area, n, &ws.ratios, inner)[idx];
+        let expected = crate::layout::dwindle(area, n, &ws.ratios, &ws.flips, inner)[idx];
         let actual = w.visible_rect();
         if (actual.w - expected.w).abs() <= 10 && (actual.h - expected.h).abs() <= 10 {
             return false; // pure move: let the swap logic handle it
         }
-        crate::layout::resize_ratios(area, n, &mut ws.ratios, inner, idx, actual);
+        let flips = ws.flips.clone();
+        crate::layout::resize_ratios(area, n, &mut ws.ratios, &flips, inner, idx, actual);
         true
     }
 
@@ -647,6 +654,7 @@ impl WindowManager {
             Command::ShrinkWindow => self.resize_focused(-0.05),
             Command::ToggleFloat => self.toggle_float(),
             Command::ToggleMonocle => self.toggle_monocle(),
+            Command::ToggleSplit => self.toggle_split(),
             Command::ToggleFullscreen => self.toggle_fullscreen(),
             Command::CloseWindow => {
                 if let Some((w, _, _)) = self.focused_window() {
@@ -908,6 +916,27 @@ impl WindowManager {
         let ws = &mut mon.workspaces[mon.active];
         ws.monocle = !ws.monocle;
         self.retile_monitor(mi);
+    }
+
+    /// Flip the split orientation at the focused tiled window: it and its
+    /// dwindle sibling switch between side-by-side and stacked.
+    fn toggle_split(&mut self) {
+        let Some((w, mi, wi)) = self.focused_window() else { return };
+        let ws = &mut self.monitors[mi].workspaces[wi];
+        let n = ws.tiled.len();
+        let Some(idx) = ws.tiled.iter().position(|x| *x == w) else { return };
+        if n < 2 || ws.monocle {
+            return;
+        }
+        // Window i's own split is divider i; the last window shares the
+        // final divider with its predecessor.
+        let split = idx.min(n - 2);
+        if ws.flips.len() <= split {
+            ws.flips.resize(split + 1, false);
+        }
+        ws.flips[split] = !ws.flips[split];
+        self.retile_monitor(mi);
+        self.update_borders();
     }
 
     fn switch_workspace(&mut self, target: usize) {
@@ -1404,7 +1433,8 @@ impl WindowManager {
                     ));
                 }
             } else {
-                let rects = dwindle(area, ws.tiled.len(), &ws.ratios, self.config.inner_gap);
+                let rects =
+                    dwindle(area, ws.tiled.len(), &ws.ratios, &ws.flips, self.config.inner_gap);
                 items.extend(ws.tiled.iter().copied().zip(rects));
             }
             for f in &ws.floating {

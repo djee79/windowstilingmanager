@@ -58,6 +58,7 @@ Defaults:
 | `Alt+Enter` | Promote focused window to the master (largest) slot |
 | `Alt+H` / `Alt+L` | Shrink / grow the focused window (its own divider; floating windows scale) |
 | `Alt+T` | Toggle floating for the focused window |
+| `Alt+V` | Flip the split at the focused window: side-by-side ⇄ stacked (Hyprland's `togglesplit`) |
 | `Alt+F` | Toggle monocle (focused workspace: every window full-size) |
 | `Alt+Shift+F` | Toggle fullscreen (covers the whole monitor, bar included) |
 | `Alt+Q` | Close the focused window |
@@ -75,6 +76,18 @@ Defaults:
 Dragging a tiled window onto another one swaps their slots. Dragging any
 window onto a workspace cell on the bar sends it to that workspace — the
 no-memorization way to reach workspace 10+ (works across monitors too).
+
+## Command line (hyprctl-style)
+
+Every action can also be driven from a terminal or script — `wtm <action>`
+sends the command to the running instance:
+
+```
+wtm toggle_split          # flip the focused window's split direction
+wtm switch_workspace 3    # workspace numbers are 1-based, like the bar
+wtm scratchpad
+wtm list                  # all actions, their arguments and current keys
+```
 
 ## More goodies
 

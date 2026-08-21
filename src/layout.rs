@@ -28,7 +28,8 @@ impl Rect {
 /// alternating orientation based on which side of the remainder is longer.
 /// `ratios[i]` is the share window i keeps at its split, so each divider can
 /// be resized independently; missing entries fall back to an even split.
-pub fn dwindle(area: Rect, count: usize, ratios: &[f32], gap: i32) -> Vec<Rect> {
+/// `flips[i]` inverts split i's automatic orientation (togglesplit).
+pub fn dwindle(area: Rect, count: usize, ratios: &[f32], flips: &[bool], gap: i32) -> Vec<Rect> {
     let mut out = Vec::with_capacity(count);
     if count == 0 {
         return out;
@@ -40,7 +41,7 @@ pub fn dwindle(area: Rect, count: usize, ratios: &[f32], gap: i32) -> Vec<Rect> 
             break;
         }
         let ratio = ratios.get(i).copied().unwrap_or(0.5).clamp(0.1, 0.9);
-        if cur.w >= cur.h {
+        if (cur.w >= cur.h) != flips.get(i).copied().unwrap_or(false) {
             // Split vertically: left part | gap | right part
             let left = (((cur.w - gap).max(2)) as f32 * ratio) as i32;
             out.push(Rect { x: cur.x, y: cur.y, w: left.max(1), h: cur.h });
@@ -73,6 +74,7 @@ pub fn resize_ratios(
     area: Rect,
     count: usize,
     ratios: &mut Vec<f32>,
+    flips: &[bool],
     gap: i32,
     idx: usize,
     actual: Rect,
@@ -84,11 +86,11 @@ pub fn resize_ratios(
     if ratios.len() < count - 1 {
         ratios.resize(count - 1, 0.5);
     }
-    let exp = dwindle(area, count, ratios, gap)[idx];
+    let exp = dwindle(area, count, ratios, flips, gap)[idx];
     let mut cur = area;
     for j in 0..count - 1 {
         let ratio = ratios[j].clamp(0.1, 0.9);
-        if cur.w >= cur.h {
+        if (cur.w >= cur.h) != flips.get(j).copied().unwrap_or(false) {
             let span = (cur.w - gap).max(2);
             let left = (span as f32 * ratio) as i32;
             let divider = cur.x + left; // right edge of window j
@@ -137,17 +139,17 @@ mod tests {
 
     #[test]
     fn empty() {
-        assert!(dwindle(AREA, 0, &[], 8).is_empty());
+        assert!(dwindle(AREA, 0, &[], &[], 8).is_empty());
     }
 
     #[test]
     fn single_window_fills_area() {
-        assert_eq!(dwindle(AREA, 1, &[], 8), vec![AREA]);
+        assert_eq!(dwindle(AREA, 1, &[], &[], 8), vec![AREA]);
     }
 
     #[test]
     fn two_windows_split_side_by_side() {
-        let r = dwindle(AREA, 2, &[0.5], 8);
+        let r = dwindle(AREA, 2, &[0.5], &[], 8);
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].h, 1080);
         assert_eq!(r[1].h, 1080);
@@ -157,14 +159,14 @@ mod tests {
     #[test]
     fn per_split_ratios_are_independent() {
         // Grow only the first divider; the second split stays even.
-        let r = dwindle(AREA, 3, &[0.7, 0.5], 10);
+        let r = dwindle(AREA, 3, &[0.7, 0.5], &[], 10);
         assert!(r[0].w > AREA.w / 2, "first window should be ~70% wide");
         assert!((r[1].h - r[2].h).abs() <= 1, "second split should stay even");
     }
 
     #[test]
     fn third_window_splits_the_right_column() {
-        let r = dwindle(AREA, 3, &[0.5, 0.5], 8);
+        let r = dwindle(AREA, 3, &[0.5, 0.5], &[], 8);
         assert_eq!(r.len(), 3);
         // Second and third windows stack in the right column.
         assert_eq!(r[1].x, r[2].x);
@@ -174,9 +176,9 @@ mod tests {
     #[test]
     fn drag_right_edge_of_master_grows_first_split() {
         let mut ratios = vec![0.5, 0.5];
-        let r = dwindle(AREA, 3, &ratios, 8);
+        let r = dwindle(AREA, 3, &ratios, &[], 8);
         let dragged = Rect { w: r[0].w + 200, ..r[0] };
-        resize_ratios(AREA, 3, &mut ratios, 8, 0, dragged);
+        resize_ratios(AREA, 3, &mut ratios, &[], 8, 0, dragged);
         assert!(
             ratios[0] > 0.58 && ratios[0] < 0.64,
             "ratio should grow ~0.6, got {}",
@@ -184,18 +186,18 @@ mod tests {
         );
         assert_eq!(ratios[1], 0.5, "untouched split must stay");
         // The new layout should honor the drag (±2px rounding).
-        let after = dwindle(AREA, 3, &ratios, 8);
+        let after = dwindle(AREA, 3, &ratios, &[], 8);
         assert!((after[0].w - dragged.w).abs() <= 2);
     }
 
     #[test]
     fn drag_left_edge_of_stacked_window_adjusts_earlier_split() {
         let mut ratios = vec![0.5, 0.5];
-        let r = dwindle(AREA, 3, &ratios, 8);
+        let r = dwindle(AREA, 3, &ratios, &[], 8);
         // Window 2 sits in the right column; dragging its left edge out
         // moves the *first* divider.
         let dragged = Rect { x: r[2].x - 200, w: r[2].w + 200, ..r[2] };
-        resize_ratios(AREA, 3, &mut ratios, 8, 2, dragged);
+        resize_ratios(AREA, 3, &mut ratios, &[], 8, 2, dragged);
         assert!(ratios[0] < 0.43, "first split should shrink, got {}", ratios[0]);
         assert_eq!(ratios[1], 0.5);
     }
@@ -203,11 +205,11 @@ mod tests {
     #[test]
     fn corner_drag_adjusts_two_splits() {
         let mut ratios = vec![0.5, 0.5];
-        let r = dwindle(AREA, 3, &ratios, 8);
+        let r = dwindle(AREA, 3, &ratios, &[], 8);
         // Window 1 (top of the right column): drag its bottom-left corner —
         // left edge is split 0's divider, bottom edge is split 1's divider.
         let dragged = Rect { x: r[1].x - 100, w: r[1].w + 100, h: r[1].h + 100, ..r[1] };
-        resize_ratios(AREA, 3, &mut ratios, 8, 1, dragged);
+        resize_ratios(AREA, 3, &mut ratios, &[], 8, 1, dragged);
         assert!(ratios[0] < 0.47);
         assert!(ratios[1] > 0.53);
     }
@@ -215,16 +217,26 @@ mod tests {
     #[test]
     fn tiny_jitter_leaves_ratios_alone() {
         let mut ratios = vec![0.5, 0.5];
-        let r = dwindle(AREA, 3, &ratios, 8);
+        let r = dwindle(AREA, 3, &ratios, &[], 8);
         let jitter = Rect { w: r[0].w + 2, ..r[0] };
-        resize_ratios(AREA, 3, &mut ratios, 8, 0, jitter);
+        resize_ratios(AREA, 3, &mut ratios, &[], 8, 0, jitter);
         assert_eq!(ratios, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn toggled_split_flips_orientation() {
+        // A wide area normally splits side-by-side; flipping split 0 stacks
+        // the two windows instead (Hyprland's togglesplit).
+        let r = dwindle(AREA, 2, &[0.5], &[true], 8);
+        assert_eq!(r[0].w, 1920);
+        assert_eq!(r[1].w, 1920);
+        assert_eq!(r[0].h + 8 + r[1].h, 1080);
     }
 
     #[test]
     fn rects_never_overlap() {
         for n in 1..10 {
-            let rects = dwindle(AREA, n, &[0.62; 9], 10);
+            let rects = dwindle(AREA, n, &[0.62; 9], &[], 10);
             for (i, a) in rects.iter().enumerate() {
                 for b in rects.iter().skip(i + 1) {
                     let overlap = a.x < b.x + b.w
